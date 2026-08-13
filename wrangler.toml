@@ -1,0 +1,13 @@
+name = "mynote-worker"
+main = "index.js"
+compatibility_date = "2024-09-01"
+
+[vars]
+ADMIN_ID = "6130223429"
+DEST_CHANNEL_ID = "5235764517"
+DEST_CHANNEL_USERNAME = "yadbegirim"
+SOURCE_CHANNEL_ID = "5430321300"
+
+[[kv_namespaces]]
+binding = "MYNOTE_KV"
+id = "c0e487e2c5da4e46a61ce8dd2965ea96"
