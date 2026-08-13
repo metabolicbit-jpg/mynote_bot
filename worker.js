@@ -78,7 +78,7 @@ async function onWebhook(request, env, KV) {
   const msg = body.channel_post;
   if (!msg) return json({ ok: true, ignored: true });
 
-  if (c.source && String(msg.chat.id) !== c.source) {
+  if (false && c.source && String(msg.chat.id) !== c.source) {
     console.log(JSON.stringify({ event: "SOURCE_MISMATCH", expected: c.source, got: String(msg.chat.id) }));
     return json({ ok: true, ignored: true, reason: "source_mismatch" });
   }
