@@ -1,10 +1,13 @@
 /*
 ===========================================================
- mynote_bot — V14 HYBRI FINAL
+ mynote_bot — V14 HYBRID FINAL BALE WEBHOOK
 ===========================================================
 
 Architecture:
-- Telegram Webhook ingestion
+- Bale Bot API
+- Bale Webhook ingestion
+- Canonical webhook: /webhook
+- Legacy webhook: /telegram/webhook
 - Independent KV Queue
 - Album aggregation
 - Batch-safe ingestion
@@ -16,11 +19,12 @@ Architecture:
 - Duplicate update protection
 - 60-minute Bale reporting
 - Health / Status / Admin endpoints
+- Webhook setup + webhook info
 - Strong debug logging
 - TTL protection: NEVER < 60 seconds
 
 Version:
-V14-HYBRID-FINAL-2026-08-13
+V14-HYBRID-FINAL-2026-08-14-BALE-WEBHOOK
 
 IMPORTANT:
 Cron should be configured in Cloudflare as:
@@ -29,44 +33,44 @@ Cron should be configured in Cloudflare as:
 
 Cron runs every minute.
 Actual post sending is controlled internally by nextSendAt.
+
+BALE:
+- BALE_BOT_TOKEN
+- BALE_TOKEN
+- BALE_API_BASE (optional)
+- BALE_WEBHOOK_SECRET (optional)
+- DEST_CHANNEL_ID supported
 ===========================================================
 */
 
-const VERSION = "V14-HYBRID-FINAL-2026-08-13";
+const VERSION = "V14-HYBRID-FINAL-2026-08-14-BALE-WEBHOOK";
 
 /* =========================================================
    DEFAULT CONFIGURATION
 ========================================================= */
 
 const DEFAULTS = {
-  MIN_DELAY_SEC: 180,          // 3 minutes
-  MAX_DELAY_SEC: 600,          // 10 minutes
+  MIN_DELAY_SEC: 180,
+  MAX_DELAY_SEC: 600,
 
   ALBUM_QUIET_SEC: 15,
 
-  REPORT_INTERVAL_SEC: 3600,   // 60 minutes
+  REPORT_INTERVAL_SEC: 3600,
 
   LOCK_TTL_SEC: 120,
 
   PROCESSING_LEASE_SEC: 300,
 
-  SEEN_UPDATE_TTL_SEC: 604800, // 7 days
+  SEEN_UPDATE_TTL_SEC: 604800,
 
-  ALBUM_TTL_SEC: 900,          // 15 minutes
+  ALBUM_TTL_SEC: 900,
 
-  DLQ_TTL_SEC: 2592000,        // 30 days
+  DLQ_TTL_SEC: 2592000,
 
   MAX_RETRIES: 5,
 
   MAX_QUEUE_SCAN: 1000,
 
-  /*
-    Maximum successful sends per Cron execution.
-
-    IMPORTANT:
-    Keep this at 1 because the actual interval between
-    successful posts is controlled by nextSendAt.
-  */
   MAX_SENDS_PER_RUN: 1
 };
 
@@ -77,7 +81,10 @@ const DEFAULTS = {
 
 function getNumber(env, name, fallback) {
   const value = Number(env?.[name]);
-  return Number.isFinite(value) ? value : fallback;
+
+  return Number.isFinite(value)
+    ? value
+    : fallback;
 }
 
 
@@ -85,27 +92,47 @@ function config(env) {
   return {
     MIN_DELAY_SEC: Math.max(
       180,
-      getNumber(env, "MIN_DELAY_SEC", DEFAULTS.MIN_DELAY_SEC)
+      getNumber(
+        env,
+        "MIN_DELAY_SEC",
+        DEFAULTS.MIN_DELAY_SEC
+      )
     ),
 
     MAX_DELAY_SEC: Math.max(
       180,
-      getNumber(env, "MAX_DELAY_SEC", DEFAULTS.MAX_DELAY_SEC)
+      getNumber(
+        env,
+        "MAX_DELAY_SEC",
+        DEFAULTS.MAX_DELAY_SEC
+      )
     ),
 
     ALBUM_QUIET_SEC: Math.max(
       15,
-      getNumber(env, "ALBUM_QUIET_SEC", DEFAULTS.ALBUM_QUIET_SEC)
+      getNumber(
+        env,
+        "ALBUM_QUIET_SEC",
+        DEFAULTS.ALBUM_QUIET_SEC
+      )
     ),
 
     REPORT_INTERVAL_SEC: Math.max(
       3600,
-      getNumber(env, "REPORT_INTERVAL_SEC", DEFAULTS.REPORT_INTERVAL_SEC)
+      getNumber(
+        env,
+        "REPORT_INTERVAL_SEC",
+        DEFAULTS.REPORT_INTERVAL_SEC
+      )
     ),
 
     LOCK_TTL_SEC: Math.max(
       60,
-      getNumber(env, "LOCK_TTL_SEC", DEFAULTS.LOCK_TTL_SEC)
+      getNumber(
+        env,
+        "LOCK_TTL_SEC",
+        DEFAULTS.LOCK_TTL_SEC
+      )
     ),
 
     PROCESSING_LEASE_SEC: Math.max(
@@ -146,12 +173,20 @@ function config(env) {
 
     MAX_RETRIES: Math.max(
       1,
-      getNumber(env, "MAX_RETRIES", DEFAULTS.MAX_RETRIES)
+      getNumber(
+        env,
+        "MAX_RETRIES",
+        DEFAULTS.MAX_RETRIES
+      )
     ),
 
     MAX_QUEUE_SCAN: Math.max(
       50,
-      getNumber(env, "MAX_QUEUE_SCAN", DEFAULTS.MAX_QUEUE_SCAN)
+      getNumber(
+        env,
+        "MAX_QUEUE_SCAN",
+        DEFAULTS.MAX_QUEUE_SCAN
+      )
     ),
 
     MAX_SENDS_PER_RUN:
@@ -163,15 +198,6 @@ function config(env) {
 /* =========================================================
    KV BINDING
 ========================================================= */
-
-/*
-  Preferred binding name:
-
-  KV
-
-  The fallbacks make migration easier if the previous
-  version used another binding name.
-*/
 
 function getKV(env) {
   return (
@@ -203,16 +229,21 @@ function requireKV(env) {
 
 async function kvGetJSON(kv, key) {
   try {
-    return await kv.get(key, {
-      type: "json",
-      cacheTtl: 30
-    });
+    return await kv.get(
+      key,
+      {
+        type: "json",
+        cacheTtl: 30
+      }
+    );
   } catch (error) {
     console.error(
       JSON.stringify({
         event: "KV_GET_ERROR",
         key,
-        error: error?.message || String(error)
+        error:
+          error?.message ||
+          String(error)
       })
     );
 
@@ -221,45 +252,32 @@ async function kvGetJSON(kv, key) {
 }
 
 
-/*
-  CRITICAL FIX:
-
-  Cloudflare KV expirationTtl MUST be >= 60.
-
-  This helper guarantees that no accidental value such
-  as 50 can ever reach KV.
-*/
-
-async function kvPutJSON(kv, key, value, ttlSeconds = null) {
+async function kvPutJSON(
+  kv,
+  key,
+  value,
+  expirationTtl
+) {
   try {
-    const options = {};
-
-    if (ttlSeconds !== null) {
-      options.expirationTtl = Math.max(
-        60,
-        Math.floor(ttlSeconds)
-      );
-    }
-
     await kv.put(
       key,
       JSON.stringify(value),
-      options
+      {
+        expirationTtl:
+          Math.max(
+            60,
+            Number(expirationTtl) || 60
+          )
+      }
     );
-
   } catch (error) {
-
     console.error(
       JSON.stringify({
         event: "KV_PUT_ERROR",
         key,
-        ttlRequested: ttlSeconds,
-        ttlApplied:
-          ttlSeconds === null
-            ? null
-            : Math.max(60, Math.floor(ttlSeconds)),
-        error: error?.message || String(error),
-        stack: error?.stack || null
+        error:
+          error?.message ||
+          String(error)
       })
     );
 
@@ -268,115 +286,25 @@ async function kvPutJSON(kv, key, value, ttlSeconds = null) {
 }
 
 
-async function kvPutText(
+async function kvDelete(
   kv,
-  key,
-  value,
-  ttlSeconds = null
+  key
 ) {
-  const options = {};
-
-  if (ttlSeconds !== null) {
-    options.expirationTtl = Math.max(
-      60,
-      Math.floor(ttlSeconds)
+  try {
+    await kv.delete(key);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "KV_DELETE_ERROR",
+        key,
+        error:
+          error?.message ||
+          String(error)
+      })
     );
+
+    throw error;
   }
-
-  await kv.put(
-    key,
-    String(value),
-    options
-  );
-}
-
-
-async function kvDelete(kv, key) {
-  await kv.delete(key);
-}
-
-
-/* =========================================================
-   KEY STRUCTURE
-========================================================= */
-
-const KEYS = {
-  scheduler: "v14:scheduler",
-
-  lock: "v14:lock",
-
-  queuePrefix: "v14:q:",
-
-  dlqPrefix: "v14:dlq:",
-
-  albumPrefix: "v14:album:",
-
-  seenPrefix: "v14:seen:",
-
-  stats: "v14:stats"
-};
-
-
-function queueKey(createdAt) {
-  return (
-    KEYS.queuePrefix +
-    String(createdAt).padStart(13, "0") +
-    ":" +
-    crypto.randomUUID()
-  );
-}
-
-
-function dlqKey() {
-  return (
-    KEYS.dlqPrefix +
-    String(Date.now()).padStart(13, "0") +
-    ":" +
-    crypto.randomUUID()
-  );
-}
-
-
-function albumKey(sourceChatId, mediaGroupId) {
-  return (
-    KEYS.albumPrefix +
-    encodeURIComponent(String(sourceChatId)) +
-    ":" +
-    encodeURIComponent(String(mediaGroupId))
-  );
-}
-
-
-function seenKey(updateId) {
-  return KEYS.seenPrefix + String(updateId);
-}
-
-
-/* =========================================================
-   RANDOM SEND DELAY
-========================================================= */
-
-function randomInteger(min, max) {
-  return Math.floor(
-    Math.random() * (max - min + 1)
-  ) + min;
-}
-
-
-function randomDelaySeconds(env) {
-  const cfg = config(env);
-
-  const min = Math.min(
-    cfg.MIN_DELAY_SEC,
-    cfg.MAX_DELAY_SEC
-  );
-
-  const max = Math.max(
-    cfg.MIN_DELAY_SEC,
-    cfg.MAX_DELAY_SEC
-  );
-
-  return randomInteger(min, max);
 }
 
 
@@ -395,16 +323,20 @@ function iso(ms = Date.now()) {
 
 
 function seconds(ms) {
-  return Math.floor(ms / 1000);
+  return Math.floor(
+    ms / 1000
+  );
 }
 
 
 /* =========================================================
-   TELEGRAM API
+   BALE BOT API
 ========================================================= */
 
 function telegramToken(env) {
   return (
+    env.BALE_BOT_TOKEN ||
+    env.BALE_TOKEN ||
     env.TELEGRAM_BOT_TOKEN ||
     env.BOT_TOKEN ||
     env.TELEGRAM_TOKEN
@@ -417,16 +349,20 @@ async function telegramAPI(
   method,
   payload
 ) {
-  const token = telegramToken(env);
+  const token =
+    telegramToken(env);
 
   if (!token) {
     throw new Error(
-      "TELEGRAM_BOT_TOKEN is not configured."
+      "BALE_BOT_TOKEN is not configured."
     );
   }
 
   const url =
-    "https://api.telegram.org/bot" +
+    (
+      env.BALE_API_BASE ||
+      "https://tapi.bale.ai/bot"
+    ) +
     token +
     "/" +
     method;
@@ -434,27 +370,33 @@ async function telegramAPI(
   let response;
 
   try {
+    response =
+      await fetch(
+        url,
+        {
+          method: "POST",
 
-    response = await fetch(
-      url,
-      {
-        method: "POST",
+          headers: {
+            "Content-Type":
+              "application/json"
+          },
 
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
-
-        body: JSON.stringify(payload)
-      }
-    );
-
+          body:
+            JSON.stringify(
+              payload
+            )
+        }
+      );
   } catch (error) {
 
-    const e = new Error(
-      "Telegram network error: " +
-      (error?.message || String(error))
-    );
+    const e =
+      new Error(
+        "Bale network error: " +
+        (
+          error?.message ||
+          String(error)
+        )
+      );
 
     e.retryable = true;
 
@@ -465,7 +407,8 @@ async function telegramAPI(
   let data;
 
   try {
-    data = await response.json();
+    data =
+      await response.json();
   } catch {
     data = null;
   }
@@ -483,19 +426,16 @@ async function telegramAPI(
 
     const error =
       new Error(
-        `Telegram API ${method} failed: ${description}`
+        `Bale API ${method} failed: ${description}`
       );
 
     error.status =
       response.status;
 
     error.retryAfter =
-      data?.parameters?.retry_after ||
+      data?.parameters
+        ?.retry_after ||
       null;
-
-    /*
-      Telegram 429 is definitely retryable.
-    */
 
     error.retryable =
       response.status === 429 ||
@@ -511,15 +451,8 @@ async function telegramAPI(
 
 
 /* =========================================================
-   TELEGRAM COPY
+   BALE COPY / FORWARD
 ========================================================= */
-
-/*
-  copyMessages is intentionally used instead of copying
-  each message individually.
-
-  This allows Telegram to preserve album grouping.
-*/
 
 async function copyQueueItem(
   env,
@@ -528,7 +461,9 @@ async function copyQueueItem(
 
   if (
     !item ||
-    !Array.isArray(item.messageIds) ||
+    !Array.isArray(
+      item.messageIds
+    ) ||
     item.messageIds.length === 0
   ) {
     throw new Error(
@@ -536,12 +471,15 @@ async function copyQueueItem(
     );
   }
 
+
   const sourceChatId =
     item.sourceChatId;
 
+
   const targetChatId =
     item.targetChatId ||
-    env.TARGET_CHAT_ID;
+    targetChatIdFromEnv(env);
+
 
   if (!sourceChatId) {
     throw new Error(
@@ -549,459 +487,83 @@ async function copyQueueItem(
     );
   }
 
+
   if (!targetChatId) {
     throw new Error(
-      "TARGET_CHAT_ID is not configured."
+      "No destination configured. Set TARGET_CHAT_ID, DESTINATION_CHAT_ID, or DEST_CHANNEL_ID."
     );
   }
 
 
-  const result =
-    await telegramAPI(
-      env,
-      "copyMessages",
-      {
-        chat_id: targetChatId,
-
-        from_chat_id:
-          sourceChatId,
-
-        message_ids:
-          item.messageIds,
-
-        disable_notification:
-          false,
-
-        protect_content:
-          false
-      }
-    );
+  const results = [];
 
 
-  /*
-    Telegram may skip messages that cannot be copied.
-
-    We deliberately treat a partial result as failure
-    rather than silently losing part of an album.
-  */
-
-  if (
-    !Array.isArray(result) ||
-    result.length !==
-      item.messageIds.length
+  for (
+    const mid of
+    item.messageIds
   ) {
 
-    const error =
-      new Error(
-        `Telegram copied ${result?.length || 0}/${item.messageIds.length} messages.`
+    let r;
+
+
+    try {
+
+      r =
+        await telegramAPI(
+          env,
+          "copyMessage",
+          {
+            chat_id:
+              targetChatId,
+
+            from_chat_id:
+              sourceChatId,
+
+            message_id:
+              mid
+          }
+        );
+
+    } catch (error) {
+
+      console.warn(
+        JSON.stringify({
+          event:
+            "COPY_MESSAGE_FALLBACK",
+
+          messageId:
+            mid,
+
+          error:
+            error?.message ||
+            String(error)
+        })
       );
 
-    error.retryable = true;
 
-    throw error;
-  }
+      r =
+        await telegramAPI(
+          env,
+          "forwardMessage",
+          {
+            chat_id:
+              targetChatId,
 
+            from_chat_id:
+              sourceChatId,
 
-  return result;
-}
-
-
-/* =========================================================
-   BALE API
-========================================================= */
-
-function baleToken(env) {
-  return (
-    env.BALE_BOT_TOKEN ||
-    env.BALE_TOKEN
-  );
-}
-
-
-function baleChatId(env) {
-  return (
-    env.BALE_REPORT_CHAT_ID ||
-    "6130223429"
-  );
-}
-
-
-async function baleAPI(
-  env,
-  method,
-  payload
-) {
-
-  const token =
-    baleToken(env);
-
-  if (!token) {
-    throw new Error(
-      "BALE_BOT_TOKEN is not configured."
-    );
-  }
-
-  const base =
-    env.BALE_API_BASE ||
-    "https://tapi.bale.ai/bot";
-
-
-  const url =
-    base.replace(/\/$/, "") +
-    token +
-    "/" +
-    method;
-
-
-  const response =
-    await fetch(
-      url,
-      {
-        method: "POST",
-
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
-
-        body:
-          JSON.stringify(payload)
-      }
-    );
-
-
-  const text =
-    await response.text();
-
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    data = {
-      raw: text
-    };
-  }
-
-
-  if (
-    !response.ok ||
-    data?.ok === false
-  ) {
-
-    throw new Error(
-      `Bale API ${method} failed: HTTP ${response.status} ${text}`
-    );
-  }
-
-
-  return data;
-}
-
-
-/* =========================================================
-   BALE REPORT
-========================================================= */
-
-async function sendBaleReport(
-  env,
-  text
-) {
-
-  const token =
-    baleToken(env);
-
-  if (!token) {
-
-    console.warn(
-      JSON.stringify({
-        event: "BALE_REPORT_SKIPPED",
-        reason:
-          "BALE_BOT_TOKEN not configured"
-      })
-    );
-
-    return false;
-  }
-
-
-  await baleAPI(
-    env,
-    "sendMessage",
-    {
-      chat_id:
-        baleChatId(env),
-
-      text,
-
-      disable_web_page_preview:
-        true
+            message_id:
+              mid
+          }
+        );
     }
-  );
-
-  return true;
-}
 
 
-/* =========================================================
-   STATS
-========================================================= */
-
-async function getStats(kv) {
-
-  const current =
-    await kvGetJSON(
-      kv,
-      KEYS.stats
-    );
-
-  if (current) {
-    return current;
-  }
-
-  return {
-    received: 0,
-    queued: 0,
-    sent: 0,
-    retries: 0,
-    failed: 0,
-    dlq: 0,
-    lastError: null,
-    lastErrorAt: null,
-    lastReceivedAt: null,
-    lastSentAt: null
-  };
-}
-
-
-async function saveStats(
-  kv,
-  stats
-) {
-
-  await kvPutJSON(
-    kv,
-    KEYS.stats,
-    stats
-  );
-}
-
-
-/* =========================================================
-   SCHEDULER STATE
-========================================================= */
-
-async function getScheduler(kv) {
-
-  const scheduler =
-    await kvGetJSON(
-      kv,
-      KEYS.scheduler
-    );
-
-  if (scheduler) {
-    return scheduler;
-  }
-
-  return {
-    version: VERSION,
-
-    nextSendAt: 0,
-
-    lastSendAt: 0,
-
-    lastReportAt: 0,
-
-    lastCronAt: 0,
-
-    lastCron: null,
-
-    createdAt: nowMs()
-  };
-}
-
-
-async function saveScheduler(
-  kv,
-  scheduler
-) {
-
-  await kvPutJSON(
-    kv,
-    KEYS.scheduler,
-    scheduler
-  );
-}
-
-
-/* =========================================================
-   LEASE LOCK
-========================================================= */
-
-/*
-  This is a lease lock.
-
-  KV is eventually consistent and is NOT an atomic
-  compare-and-set database. Therefore this is safer
-  than the previous simple lock, but not equivalent
-  to a Durable Object mutex.
-
-  The lock TTL is NEVER below 60 seconds.
-*/
-
-async function acquireLock(
-  kv,
-  env
-) {
-
-  const cfg = config(env);
-
-  const existing =
-    await kvGetJSON(
-      kv,
-      KEYS.lock
-    );
-
-
-  const now =
-    nowMs();
-
-
-  if (
-    existing &&
-    existing.expiresAt > now
-  ) {
-
-    return null;
+    results.push(r);
   }
 
 
-  const token =
-    crypto.randomUUID();
-
-
-  const lock = {
-    token,
-
-    acquiredAt:
-      now,
-
-    expiresAt:
-      now +
-      cfg.LOCK_TTL_SEC * 1000,
-
-    version:
-      VERSION
-  };
-
-
-  await kvPutJSON(
-    kv,
-    KEYS.lock,
-    lock,
-    cfg.LOCK_TTL_SEC
-  );
-
-
-  /*
-    Verify the write before proceeding.
-  */
-
-  const verify =
-    await kvGetJSON(
-      kv,
-      KEYS.lock
-    );
-
-
-  if (
-    !verify ||
-    verify.token !== token
-  ) {
-
-    return null;
-  }
-
-
-  return token;
-}
-
-
-async function releaseLock(
-  kv,
-  token
-) {
-
-  if (!token) {
-    return;
-  }
-
-
-  const current =
-    await kvGetJSON(
-      kv,
-      KEYS.lock
-    );
-
-
-  if (
-    current &&
-    current.token === token
-  ) {
-
-    await kvDelete(
-      kv,
-      KEYS.lock
-    );
-  }
-}
-
-
-/* =========================================================
-   TELEGRAM UPDATE DEDUPLICATION
-========================================================= */
-
-async function isDuplicateUpdate(
-  kv,
-  env,
-  updateId
-) {
-
-  if (
-    updateId === undefined ||
-    updateId === null
-  ) {
-    return false;
-  }
-
-
-  const key =
-    seenKey(updateId);
-
-
-  const exists =
-    await kv.get(
-      key,
-      {
-        cacheTtl: 30
-      }
-    );
-
-
-  if (exists) {
-    return true;
-  }
-
-
-  await kvPutText(
-    kv,
-    key,
-    "1",
-    config(env).SEEN_UPDATE_TTL_SEC
-  );
-
-
-  return false;
+  return results;
 }
 
 
@@ -1019,13 +581,348 @@ function sourceChatId(env) {
 }
 
 
-function targetChatId(env) {
+function targetChatIdFromEnv(
+  env
+) {
 
   return String(
     env.TARGET_CHAT_ID ||
     env.DESTINATION_CHAT_ID ||
+    env.DEST_CHANNEL_ID ||
     ""
   );
+}
+
+
+/* =========================================================
+   RANDOM DELAY
+========================================================= */
+
+function randomDelaySeconds(
+  env
+) {
+
+  const cfg =
+    config(env);
+
+  const min =
+    cfg.MIN_DELAY_SEC;
+
+  const max =
+    Math.max(
+      min,
+      cfg.MAX_DELAY_SEC
+    );
+
+  return Math.floor(
+    min +
+    Math.random() *
+      (
+        max -
+        min +
+        1
+      )
+  );
+}
+
+
+/* =========================================================
+   KEY HELPERS
+========================================================= */
+
+function queueKey(
+  id
+) {
+  return `queue:${id}`;
+}
+
+
+function dlqKey(
+  id
+) {
+  return `dlq:${id}`;
+}
+
+
+function seenUpdateKey(
+  updateId
+) {
+  return `seen:update:${updateId}`;
+}
+
+
+function albumKey(
+  chatId,
+  mediaGroupId
+) {
+  return (
+    `album:${chatId}:${mediaGroupId}`
+  );
+}
+
+
+function lockKey() {
+  return "system:lock";
+}
+
+
+function schedulerKey() {
+  return "system:scheduler";
+}
+
+
+/* =========================================================
+   QUEUE HELPERS
+========================================================= */
+
+async function getQueueItem(
+  kv,
+  id
+) {
+  return await kvGetJSON(
+    kv,
+    queueKey(id)
+  );
+}
+
+
+async function saveQueueItem(
+  env,
+  kv,
+  item
+) {
+
+  const ttl =
+    config(env)
+      .DLQ_TTL_SEC;
+
+  await kvPutJSON(
+    kv,
+    queueKey(
+      item.id
+    ),
+    item,
+    ttl
+  );
+}
+
+
+async function deleteQueueItem(
+  kv,
+  id
+) {
+  await kvDelete(
+    kv,
+    queueKey(id)
+  );
+}
+
+
+async function listQueue(
+  env,
+  kv
+) {
+
+  const cfg =
+    config(env);
+
+  const list =
+    await kv.list({
+      prefix: "queue:",
+      limit:
+        cfg.MAX_QUEUE_SCAN
+    });
+
+  const items = [];
+
+
+  for (
+    const key of
+    list.keys
+  ) {
+
+    const id =
+      key.name.replace(
+        "queue:",
+        ""
+      );
+
+    const item =
+      await getQueueItem(
+        kv,
+        id
+      );
+
+    if (item) {
+      items.push(item);
+    }
+  }
+
+
+  items.sort(
+    (a, b) =>
+      (
+        Number(
+          a.createdAt
+        ) || 0
+      ) -
+      (
+        Number(
+          b.createdAt
+        ) || 0
+      )
+  );
+
+
+  return items;
+}
+
+
+/* =========================================================
+   SCHEDULER
+========================================================= */
+
+async function getScheduler(
+  kv
+) {
+
+  return (
+    await kvGetJSON(
+      kv,
+      schedulerKey()
+    )
+  ) || {
+    nextSendAt: 0,
+    lastSendAt: 0,
+    lastReportAt: 0,
+    lastCronAt: 0,
+    lastCron: "",
+    sent: 0,
+    failed: 0
+  };
+}
+
+
+async function saveScheduler(
+  kv,
+  scheduler
+) {
+
+  await kvPutJSON(
+    kv,
+    schedulerKey(),
+    scheduler,
+    31536000
+  );
+}
+
+
+/* =========================================================
+   LOCK
+========================================================= */
+
+async function acquireLock(
+  kv,
+  env
+) {
+
+  const key =
+    lockKey();
+
+  const existing =
+    await kv.get(key);
+
+  if (existing) {
+    return null;
+  }
+
+  const token =
+    crypto.randomUUID();
+
+  await kv.put(
+    key,
+    token,
+    {
+      expirationTtl:
+        config(env)
+          .LOCK_TTL_SEC
+    }
+  );
+
+  const confirmed =
+    await kv.get(key);
+
+  if (
+    confirmed !== token
+  ) {
+    return null;
+  }
+
+  return token;
+}
+
+
+async function releaseLock(
+  kv,
+  token
+) {
+
+  const key =
+    lockKey();
+
+  const existing =
+    await kv.get(key);
+
+  if (
+    existing === token
+  ) {
+    await kv.delete(key);
+  }
+}
+
+
+/* =========================================================
+   DUPLICATE UPDATE PROTECTION
+========================================================= */
+
+async function isDuplicateUpdate(
+  kv,
+  env,
+  updateId
+) {
+
+  if (
+    updateId ===
+    undefined ||
+    updateId ===
+    null
+  ) {
+    return false;
+  }
+
+  const key =
+    seenUpdateKey(
+      updateId
+    );
+
+  const exists =
+    await kv.get(key);
+
+  if (exists) {
+    return true;
+  }
+
+  await kv.put(
+    key,
+    "1",
+    {
+      expirationTtl:
+        config(env)
+          .SEEN_UPDATE_TTL_SEC
+    }
+  );
+
+  return false;
 }
 
 
@@ -1040,70 +937,58 @@ async function enqueueMessage(
 ) {
 
   const createdAt =
-    Number(message.date)
-      ? Number(message.date) * 1000
-      : nowMs();
+    nowMs();
 
+  const id =
+    `msg-${message.chat.id}-${message.message_id}`;
 
   const item = {
 
-    id:
-      crypto.randomUUID(),
-
-    version:
-      VERSION,
+    id,
 
     type:
-      "single",
+      "message",
 
     sourceChatId:
-      String(message.chat.id),
+      String(
+        message.chat.id
+      ),
 
-    targetChatId:
-      targetChatId(env),
-
-    messageIds:
-      [Number(message.message_id)],
-
-    mediaGroupId:
-      null,
+    messageIds: [
+      Number(
+        message.message_id
+      )
+    ],
 
     createdAt,
 
-    queuedAt:
-      nowMs(),
+    updatedAt:
+      createdAt,
 
-    attempts:
+    retryCount:
       0,
 
-    retryAt:
-      0,
+    status:
+      "pending",
 
-    state:
-      "pending"
+    nextAttemptAt:
+      0
   };
 
 
-  const key =
-    queueKey(createdAt);
-
-
-  await kvPutJSON(
+  await saveQueueItem(
+    env,
     kv,
-    key,
     item
   );
 
 
-  return {
-    key,
-    item
-  };
+  return item;
 }
 
 
 /* =========================================================
-   ENQUEUE ALBUM
+   ALBUM AGGREGATION
 ========================================================= */
 
 async function addAlbumMessage(
@@ -1113,14 +998,16 @@ async function addAlbumMessage(
 ) {
 
   const mediaGroupId =
-    String(
-      message.media_group_id
-    );
+    message.media_group_id;
 
+  const chatId =
+    String(
+      message.chat.id
+    );
 
   const key =
     albumKey(
-      message.chat.id,
+      chatId,
       mediaGroupId
     );
 
@@ -1136,19 +1023,19 @@ async function addAlbumMessage(
 
     album = {
 
-      version:
-        VERSION,
+      id:
+        `album-${chatId}-${mediaGroupId}`,
 
       type:
         "album",
 
       sourceChatId:
-        String(message.chat.id),
+        chatId,
 
-      targetChatId:
-        targetChatId(env),
-
-      mediaGroupId,
+      mediaGroupId:
+        String(
+          mediaGroupId
+        ),
 
       messageIds: [],
 
@@ -1158,18 +1045,24 @@ async function addAlbumMessage(
         nowMs(),
 
       updatedAt:
-        nowMs()
+        nowMs(),
+
+      status:
+        "collecting",
+
+      targetChatId:
+        targetChatIdFromEnv(
+          env
+        )
     };
   }
 
 
   const messageId =
-    Number(message.message_id);
+    Number(
+      message.message_id
+    );
 
-
-  /*
-    Deduplicate individual album messages.
-  */
 
   if (
     !album.messageIds.includes(
@@ -1186,17 +1079,21 @@ async function addAlbumMessage(
       messageId,
 
       date:
-        Number(message.date) || 0
+        Number(
+          message.date
+        ) || 0
     });
   }
 
 
   album.messageIds =
-    [...new Set(
-      album.messageIds
-    )]
-    .sort(
-      (a, b) => a - b
+    [
+      ...new Set(
+        album.messageIds
+      )
+    ].sort(
+      (a, b) =>
+        a - b
     );
 
 
@@ -1217,7 +1114,8 @@ async function addAlbumMessage(
     kv,
     key,
     album,
-    config(env).ALBUM_TTL_SEC
+    config(env)
+      .ALBUM_TTL_SEC
   );
 
 
@@ -1226,7 +1124,135 @@ async function addAlbumMessage(
 
 
 /* =========================================================
-   TELEGRAM WEBHOOK HANDLER
+   FINALIZE ALBUMS
+========================================================= */
+
+async function finalizeAlbums(
+  env,
+  kv
+) {
+
+  const cfg =
+    config(env);
+
+  const list =
+    await kv.list({
+      prefix: "album:",
+      limit:
+        cfg.MAX_QUEUE_SCAN
+    });
+
+  let finalized = 0;
+
+
+  for (
+    const key of
+    list.keys
+  ) {
+
+    const album =
+      await kvGetJSON(
+        kv,
+        key.name
+      );
+
+    if (!album) {
+      continue;
+    }
+
+
+    const age =
+      nowMs() -
+      (
+        Number(
+          album.updatedAt
+        ) || 0
+      );
+
+
+    if (
+      age <
+      cfg.ALBUM_QUIET_SEC *
+        1000
+    ) {
+      continue;
+    }
+
+
+    if (
+      album.status !==
+      "collecting"
+    ) {
+      continue;
+    }
+
+
+    const queueItem = {
+
+      id:
+        album.id,
+
+      type:
+        "album",
+
+      sourceChatId:
+        album.sourceChatId,
+
+      messageIds:
+        album.messageIds,
+
+      createdAt:
+        album.createdAt,
+
+      updatedAt:
+        nowMs(),
+
+      retryCount:
+        0,
+
+      status:
+        "pending",
+
+      nextAttemptAt:
+        0,
+
+      targetChatId:
+        album.targetChatId ||
+        targetChatIdFromEnv(
+          env
+        )
+    };
+
+
+    await saveQueueItem(
+      env,
+      kv,
+      queueItem
+    );
+
+
+    album.status =
+      "finalized";
+
+
+    await kvPutJSON(
+      kv,
+      key.name,
+      album,
+      cfg.ALBUM_TTL_SEC
+    );
+
+
+    finalized++;
+  }
+
+
+  return finalized;
+}
+
+
+/* =========================================================
+   BALE WEBHOOK HANDLER
 ========================================================= */
 
 async function handleTelegramUpdate(
@@ -1238,21 +1264,19 @@ async function handleTelegramUpdate(
     requireKV(env);
 
 
-  const body =
-    await request.json();
-
-
-  /*
-    Telegram webhook secret.
-  */
-
   const configuredSecret =
+    env.BALE_WEBHOOK_SECRET ||
     env.TELEGRAM_WEBHOOK_SECRET;
 
 
-  if (configuredSecret) {
+  if (
+    configuredSecret
+  ) {
 
     const receivedSecret =
+      request.headers.get(
+        "X-Bale-Bot-Api-Secret-Token"
+      ) ||
       request.headers.get(
         "X-Telegram-Bot-Api-Secret-Token"
       );
@@ -1270,6 +1294,7 @@ async function handleTelegramUpdate(
         })
       );
 
+
       return new Response(
         "Unauthorized",
         {
@@ -1277,6 +1302,28 @@ async function handleTelegramUpdate(
         }
       );
     }
+  }
+
+
+  let body;
+
+  try {
+
+    body =
+      await request.json();
+
+  } catch {
+
+    return Response.json(
+      {
+        ok: false,
+        error:
+          "Invalid JSON."
+      },
+      {
+        status: 400
+      }
+    );
   }
 
 
@@ -1300,10 +1347,7 @@ async function handleTelegramUpdate(
 
 
   /*
-    We only process channel_post.
-
-    edited_channel_post is intentionally ignored
-    because V14 is a publishing queue, not an editor.
+    Bale channel update.
   */
 
   const message =
@@ -1325,7 +1369,9 @@ async function handleTelegramUpdate(
 
   if (
     expectedSource &&
-    String(message.chat.id) !==
+    String(
+      message.chat.id
+    ) !==
       expectedSource
   ) {
 
@@ -1338,32 +1384,26 @@ async function handleTelegramUpdate(
           expectedSource,
 
         received:
-          String(message.chat.id)
+          String(
+            message.chat.id
+          )
       })
     );
 
 
     return Response.json({
       ok: true,
+
       ignored: true,
+
       reason:
         "source_chat_mismatch"
     });
   }
 
 
-  const stats =
-    await getStats(kv);
-
-
-  stats.received += 1;
-
-  stats.lastReceivedAt =
-    nowMs();
-
-
   /*
-    ALBUM
+    Album
   */
 
   if (
@@ -1378,51 +1418,26 @@ async function handleTelegramUpdate(
       );
 
 
-    stats.queued += 1;
-
-
-    await saveStats(
-      kv,
-      stats
-    );
-
-
-    console.log(
-      JSON.stringify({
-        event:
-          "ALBUM_RECEIVED",
-
-        mediaGroupId:
-          message.media_group_id,
-
-        messages:
-          album.messageIds,
-
-        updateId
-      })
-    );
-
-
     return Response.json({
       ok: true,
 
       queued:
-        "album_pending",
+        "album",
 
-      media_group_id:
-        message.media_group_id,
+      albumId:
+        album.id,
 
-      messages:
-        album.messageIds.length
+      messageId:
+        message.message_id
     });
   }
 
 
   /*
-    SINGLE MESSAGE
+    Normal message
   */
 
-  const result =
+  const item =
     await enqueueMessage(
       env,
       kv,
@@ -1430,556 +1445,97 @@ async function handleTelegramUpdate(
     );
 
 
-  stats.queued += 1;
-
-
-  await saveStats(
-    kv,
-    stats
-  );
-
-
-  console.log(
-    JSON.stringify({
-      event:
-        "MESSAGE_QUEUED",
-
-      queueKey:
-        result.key,
-
-      messageId:
-        message.message_id,
-
-      updateId
-    })
-  );
-
-
   return Response.json({
     ok: true,
-    queued: true,
-    queueKey:
-      result.key
+
+    queued:
+      "message",
+
+    queueId:
+      item.id
   });
 }
 
 
 /* =========================================================
-   FINALIZE QUIET ALBUMS
+   RETRY
 ========================================================= */
 
-async function finalizeAlbums(
-  env,
-  kv
+function calculateBackoff(
+  retryCount
 ) {
 
-  const cfg =
-    config(env);
+  const base =
+    60;
 
+  const max =
+    3600;
 
-  const listed =
-    await kv.list({
-      prefix:
-        KEYS.albumPrefix,
-
-      limit:
-        cfg.MAX_QUEUE_SCAN
-    });
-
-
-  let finalized =
-    0;
-
-
-  for (
-    const keyInfo of listed.keys
-  ) {
-
-    const key =
-      keyInfo.name;
-
-
-    const album =
-      await kvGetJSON(
-        kv,
-        key
-      );
-
-
-    if (!album) {
-      continue;
-    }
-
-
-    const age =
-      nowMs() -
-      Number(album.updatedAt || 0);
-
-
-    if (
-      age <
-      cfg.ALBUM_QUIET_SEC * 1000
-    ) {
-
-      continue;
-    }
-
-
-    if (
-      !Array.isArray(
-        album.messageIds
-      ) ||
-      album.messageIds.length === 0
-    ) {
-
-      await kvDelete(
-        kv,
-        key
-      );
-
-      continue;
-    }
-
-
-    /*
-      Re-read before promotion.
-
-      This prevents deleting an album that received
-      another webhook between the initial read and now.
-    */
-
-    const verify =
-      await kvGetJSON(
-        kv,
-        key
-      );
-
-
-    if (
-      !verify ||
-      verify.updatedAt !==
-        album.updatedAt
-    ) {
-
-      continue;
-    }
-
-
-    const createdAt =
-      Number(
-        album.messages?.[0]?.date
-      )
-        ? Number(
-            album.messages[0].date
-          ) * 1000
-        : Number(
-            album.createdAt
-          ) || nowMs();
-
-
-    const item = {
-
-      id:
-        crypto.randomUUID(),
-
-      version:
-        VERSION,
-
-      type:
-        "album",
-
-      sourceChatId:
-        album.sourceChatId,
-
-      targetChatId:
-        album.targetChatId,
-
-      messageIds:
-        album.messageIds,
-
-      mediaGroupId:
-        album.mediaGroupId,
-
-      createdAt,
-
-      queuedAt:
-        nowMs(),
-
-      attempts:
-        0,
-
-      retryAt:
-        0,
-
-      state:
-        "pending"
-    };
-
-
-    const queueKeyName =
-      queueKey(createdAt);
-
-
-    await kvPutJSON(
-      kv,
-      queueKeyName,
-      item
-    );
-
-
-    await kvDelete(
-      kv,
-      key
-    );
-
-
-    finalized += 1;
-
-
-    console.log(
-      JSON.stringify({
-        event:
-          "ALBUM_FINALIZED",
-
-        queueKey:
-          queueKeyName,
-
-        mediaGroupId:
-          album.mediaGroupId,
-
-        messages:
-          album.messageIds
-      })
-    );
-  }
-
-
-  return finalized;
-}
-
-
-/* =========================================================
-   QUEUE LIST
-========================================================= */
-
-async function listQueue(
-  env,
-  kv
-) {
-
-  const cfg =
-    config(env);
-
-
-  const listed =
-    await kv.list({
-      prefix:
-        KEYS.queuePrefix,
-
-      limit:
-        cfg.MAX_QUEUE_SCAN
-    });
-
-
-  const items = [];
-
-
-  for (
-    const keyInfo of listed.keys
-  ) {
-
-    const key =
-      keyInfo.name;
-
-
-    const item =
-      await kvGetJSON(
-        kv,
-        key
-      );
-
-
-    if (!item) {
-      continue;
-    }
-
-
-    items.push({
-      key,
-      item
-    });
-  }
-
-
-  items.sort(
-    (a, b) =>
-      Number(
-        a.item.createdAt || 0
-      ) -
-      Number(
-        b.item.createdAt || 0
-      )
-  );
-
-
-  return items;
-}
-
-
-/* =========================================================
-   DLQ LIST
-========================================================= */
-
-async function listDLQ(
-  env,
-  kv
-) {
-
-  const cfg =
-    config(env);
-
-
-  const listed =
-    await kv.list({
-      prefix:
-        KEYS.dlqPrefix,
-
-      limit:
-        cfg.MAX_QUEUE_SCAN
-    });
-
-
-  return listed.keys;
-}
-
-
-/* =========================================================
-   RETRY BACKOFF
-========================================================= */
-
-function retryDelaySeconds(
-  attempt,
-  retryAfter
-) {
-
-  /*
-    Telegram's retry_after has priority.
-  */
-
-  if (
-    Number.isFinite(
-      Number(retryAfter)
-    ) &&
-    Number(retryAfter) > 0
-  ) {
-
-    return Math.max(
-      60,
-      Number(retryAfter)
-    );
-  }
-
-
-  /*
-    60
-    120
-    240
-    480
-    900
-  */
-
-  const delays = [
-    60,
-    120,
-    240,
-    480,
-    900
-  ];
-
-
-  const index =
+  const exponential =
     Math.min(
-      Math.max(
-        0,
-        Number(attempt) - 1
-      ),
-      delays.length - 1
+      max,
+      base *
+      Math.pow(
+        2,
+        retryCount
+      )
     );
 
+  const jitter =
+    Math.floor(
+      Math.random() *
+      30
+    );
 
-  return delays[index];
+  return (
+    exponential +
+    jitter
+  );
 }
 
 
 /* =========================================================
-   DEAD LETTER QUEUE
+   DLQ
 ========================================================= */
 
 async function moveToDLQ(
   env,
   kv,
-  queueKeyName,
   item,
   error
 ) {
 
-  const cfg =
-    config(env);
+  const record = {
 
+    ...item,
 
-  const dlqItem = {
+    status:
+      "dead",
 
-    version:
-      VERSION,
-
-    originalQueueKey:
-      queueKeyName,
-
-    original:
-      item,
-
-    movedAt:
+    failedAt:
       nowMs(),
 
-    attempts:
-      item.attempts,
-
-    error:
+    lastError:
       error?.message ||
-      String(error),
-
-    retryAfter:
-      error?.retryAfter ||
-      null
+      String(error)
   };
 
 
   await kvPutJSON(
     kv,
-    dlqKey(),
-    dlqItem,
-    cfg.DLQ_TTL_SEC
+    dlqKey(
+      item.id
+    ),
+    record,
+    config(env)
+      .DLQ_TTL_SEC
   );
 
 
-  await kvDelete(
+  await deleteQueueItem(
     kv,
-    queueKeyName
+    item.id
   );
-
-
-  const stats =
-    await getStats(kv);
-
-
-  stats.failed += 1;
-
-  stats.dlq += 1;
-
-  stats.lastError =
-    dlqItem.error;
-
-  stats.lastErrorAt =
-    nowMs();
-
-
-  await saveStats(
-    kv,
-    stats
-  );
-
-
-  console.error(
-    JSON.stringify({
-      event:
-        "MOVED_TO_DLQ",
-
-      queueKey:
-        queueKeyName,
-
-      attempts:
-        item.attempts,
-
-      error:
-        dlqItem.error
-    })
-  );
-}
-
-
-/* =========================================================
-   RECOVER STALE PROCESSING ITEM
-========================================================= */
-
-async function normalizeItem(
-  env,
-  kv,
-  queueKeyName,
-  item
-) {
-
-  if (
-    item.state !==
-    "processing"
-  ) {
-
-    return item;
-  }
-
-
-  const leaseUntil =
-    Number(
-      item.processingUntil || 0
-    );
-
-
-  if (
-    leaseUntil >
-    nowMs()
-  ) {
-
-    return item;
-  }
-
-
-  /*
-    Worker may have died during send.
-
-    We return it to pending rather than losing it.
-  */
-
-  item.state =
-    "pending";
-
-  item.processingUntil =
-    0;
-
-  item.recoveredAt =
-    nowMs();
-
-
-  await kvPutJSON(
-    kv,
-    queueKeyName,
-    item
-  );
-
-
-  console.warn(
-    JSON.stringify({
-      event:
-        "STALE_ITEM_RECOVERED",
-
-      queueKey:
-        queueKeyName,
-
-      attempts:
-        item.attempts
-    })
-  );
-
-
-  return item;
 }
 
 
@@ -1987,415 +1543,103 @@ async function normalizeItem(
    PROCESS ONE QUEUE ITEM
 ========================================================= */
 
-async function processOneQueueItem(
+async function processQueueItem(
   env,
   kv,
-  scheduler
+  item
 ) {
 
-  const queue =
-    await listQueue(
+  try {
+
+    await copyQueueItem(
       env,
-      kv
-    );
-
-
-  if (
-    queue.length === 0
-  ) {
-
-    scheduler.nextSendAt =
-      0;
-
-    return {
-      status:
-        "empty",
-
-      scheduler
-    };
-  }
-
-
-  /*
-    First queue item = strict FIFO.
-
-    We do NOT skip it for a later post.
-  */
-
-  const selected =
-    queue[0];
-
-
-  const key =
-    selected.key;
-
-
-  let item =
-    selected.item;
-
-
-  item =
-    await normalizeItem(
-      env,
-      kv,
-      key,
       item
     );
 
 
-  const now =
-    nowMs();
-
-
-  /*
-    If the first item is waiting for retry,
-    don't bypass it.
-  */
-
-  if (
-    Number(item.retryAt || 0) >
-    now
-  ) {
-
-    scheduler.nextSendAt =
-      Number(item.retryAt);
-
-    return {
-      status:
-        "waiting_retry",
-
-      retryAt:
-        Number(item.retryAt),
-
-      scheduler
-    };
-  }
-
-
-  /*
-    Claim item.
-  */
-
-  item.state =
-    "processing";
-
-  item.processingAt =
-    now;
-
-  item.processingUntil =
-    now +
-    config(env).PROCESSING_LEASE_SEC *
-      1000;
-
-
-  item.attempts =
-    Number(item.attempts || 0) +
-    1;
-
-
-  await kvPutJSON(
-    kv,
-    key,
-    item
-  );
-
-
-  console.log(
-    JSON.stringify({
-      event:
-        "SEND_ATTEMPT",
-
-      queueKey:
-        key,
-
-      type:
-        item.type,
-
-      messageIds:
-        item.messageIds,
-
-      attempt:
-        item.attempts
-    })
-  );
-
-
-  try {
-
-    const result =
-      await copyQueueItem(
-        env,
-        item
-      );
-
-
-    /*
-      SUCCESS
-    */
-
-    await kvDelete(
+    await deleteQueueItem(
       kv,
-      key
+      item.id
     );
 
 
-    const stats =
-      await getStats(kv);
-
-
-    stats.sent += 1;
-
-    stats.lastSentAt =
-      nowMs();
-
-    stats.lastError =
-      null;
-
-    stats.lastErrorAt =
-      null;
-
-
-    await saveStats(
-      kv,
-      stats
-    );
-
-
-    scheduler.lastSendAt =
-      nowMs();
-
-
-    /*
-      Check if more posts remain.
-    */
-
-    const remaining =
-      await listQueue(
-        env,
-        kv
-      );
-
-
-    if (
-      remaining.length > 0
-    ) {
-
-      const delay =
-        randomDelaySeconds(
-          env
-        );
-
-
-      scheduler.nextSendAt =
-        nowMs() +
-        delay * 1000;
-
-
-      console.log(
-        JSON.stringify({
-          event:
-            "SEND_SUCCESS",
-
-          queueKey:
-            key,
-
-          sentMessages:
-            result.length,
-
-          nextDelaySeconds:
-            delay,
-
-          nextSendAt:
-            iso(
-              scheduler.nextSendAt
-            )
-        })
-      );
-
-    } else {
-
-      /*
-        Queue is empty.
-
-        nextSendAt = 0 means that when a new
-        post arrives, the next Cron will start
-        a new random 3–10 minute cycle.
-      */
-
-      scheduler.nextSendAt =
-        0;
-
-
-      console.log(
-        JSON.stringify({
-          event:
-            "QUEUE_EMPTY_AFTER_SEND",
-
-          queueKey:
-            key
-        })
-      );
-    }
-
-
     return {
-      status:
-        "sent",
-
-      scheduler,
-
-      result
+      ok: true
     };
 
   } catch (error) {
 
-    console.error(
-      JSON.stringify({
-        event:
-          "SEND_ERROR",
+    const retryCount =
+      Number(
+        item.retryCount
+      ) || 0;
 
-        queueKey:
-          key,
-
-        attempt:
-          item.attempts,
-
-        error:
-          error?.message ||
-          String(error),
-
-        retryAfter:
-          error?.retryAfter ||
-          null,
-
-        stack:
-          error?.stack ||
-          null
-      })
-    );
-
-
-    const stats =
-      await getStats(kv);
-
-
-    stats.retries += 1;
-
-    stats.lastError =
-      error?.message ||
-      String(error);
-
-    stats.lastErrorAt =
-      nowMs();
-
-
-    await saveStats(
-      kv,
-      stats
-    );
-
-
-    /*
-      Retry limit reached.
-    */
 
     if (
-      item.attempts >=
-      config(env).MAX_RETRIES
+      retryCount >=
+      config(env)
+        .MAX_RETRIES
     ) {
 
       await moveToDLQ(
         env,
         kv,
-        key,
         item,
         error
       );
 
 
-      scheduler.nextSendAt =
-        nowMs() +
-        60 * 1000;
-
-
       return {
-        status:
-          "dlq",
-
-        scheduler
+        ok: false,
+        dead: true,
+        error:
+          error?.message ||
+          String(error)
       };
     }
 
 
-    /*
-      Smart retry.
-    */
-
-    const delay =
-      retryDelaySeconds(
-        item.attempts,
-        error?.retryAfter
-      );
+    item.retryCount =
+      retryCount + 1;
 
 
-    item.state =
-      "pending";
+    item.status =
+      "retry";
 
-    item.retryAt =
-      nowMs() +
-      delay * 1000;
-
-    item.processingUntil =
-      0;
 
     item.lastError =
       error?.message ||
       String(error);
 
 
-    await kvPutJSON(
+    item.nextAttemptAt =
+      nowMs() +
+      calculateBackoff(
+        item.retryCount
+      ) *
+      1000;
+
+
+    await saveQueueItem(
+      env,
       kv,
-      key,
       item
     );
 
 
-    scheduler.nextSendAt =
-      item.retryAt;
-
-
-    console.warn(
-      JSON.stringify({
-        event:
-          "RETRY_SCHEDULED",
-
-        queueKey:
-          key,
-
-        attempt:
-          item.attempts,
-
-        retryDelaySeconds:
-          delay,
-
-        retryAt:
-          iso(item.retryAt)
-      })
-    );
-
-
     return {
-      status:
-        "retry",
-
-      scheduler
+      ok: false,
+      retry: true,
+      error:
+        error?.message ||
+        String(error)
     };
   }
 }
 
 
 /* =========================================================
-   STATUS SNAPSHOT
+   STATUS
 ========================================================= */
 
 async function buildStatus(
@@ -2404,11 +1648,9 @@ async function buildStatus(
 ) {
 
   const scheduler =
-    await getScheduler(kv);
-
-
-  const stats =
-    await getStats(kv);
+    await getScheduler(
+      kv
+    );
 
 
   const queue =
@@ -2419,121 +1661,80 @@ async function buildStatus(
 
 
   const dlq =
-    await listDLQ(
-      env,
-      kv
-    );
+    await kv.list({
+      prefix: "dlq:",
+      limit: 100
+    });
 
 
   return {
 
+    ok: true,
+
     version:
       VERSION,
 
-    now:
-      iso(),
+    queueLength:
+      queue.length,
 
-    scheduler: {
+    dlqLength:
+      dlq.keys.length,
 
-      nextSendAt:
-        scheduler.nextSendAt
-          ? iso(
-              scheduler.nextSendAt
-            )
-          : null,
+    scheduler,
 
-      lastSendAt:
-        scheduler.lastSendAt
-          ? iso(
-              scheduler.lastSendAt
-            )
-          : null,
+    sourceChatId:
+      sourceChatId(env),
 
-      lastReportAt:
-        scheduler.lastReportAt
-          ? iso(
-              scheduler.lastReportAt
-            )
-          : null,
+    targetChatId:
+      targetChatIdFromEnv(
+        env
+      ),
 
-      lastCronAt:
-        scheduler.lastCronAt
-          ? iso(
-              scheduler.lastCronAt
-            )
-          : null,
-
-      lastCron:
-        scheduler.lastCron
-    },
-
-    queue: {
-
-      count:
-        queue.length,
-
-      items:
-        queue
-          .slice(0, 50)
-          .map(
-            x => ({
-              key:
-                x.key,
-
-              type:
-                x.item.type,
-
-              messageIds:
-                x.item.messageIds,
-
-              attempts:
-                x.item.attempts,
-
-              retryAt:
-                x.item.retryAt
-                  ? iso(
-                      x.item.retryAt
-                    )
-                  : null,
-
-              state:
-                x.item.state,
-
-              createdAt:
-                iso(
-                  x.item.createdAt
-                )
-            })
-          )
-    },
-
-    dlq: {
-
-      count:
-        dlq.length
-    },
-
-    stats
+    time:
+      iso()
   };
 }
 
 
 /* =========================================================
-   60-MINUTE BALE REPORT
+   BALE REPORT
 ========================================================= */
 
-function formatDate(ms) {
+async function sendBaleReport(
+  env,
+  text
+) {
 
-  if (!ms) {
-    return "—";
+  const target =
+  env.BALE_REPORT_CHAT_ID ||
+  env.ADMIN_ID ||
+    targetChatIdFromEnv(
+      env
+    );
+
+  if (!target) {
+    throw new Error(
+      "No target configured for Bale report."
+    );
   }
 
-  return new Date(ms)
-    .toISOString()
-    .replace("T", " ")
-    .replace(".000Z", " UTC");
+
+  return await telegramAPI(
+    env,
+    "sendMessage",
+    {
+      chat_id:
+        target,
+
+      text
+    }
+  );
 }
 
+
+/* =========================================================
+   HOURLY REPORT
+========================================================= */
 
 async function maybeSendHourlyReport(
   env,
@@ -2541,32 +1742,31 @@ async function maybeSendHourlyReport(
   scheduler
 ) {
 
-  const cfg =
-    config(env);
-
-
   const now =
     nowMs();
 
 
-  const shouldReport =
-    !scheduler.lastReportAt ||
-    now -
-      Number(
-        scheduler.lastReportAt
-      ) >=
-      cfg.REPORT_INTERVAL_SEC *
-        1000;
+  const interval =
+    config(env)
+      .REPORT_INTERVAL_SEC *
+    1000;
 
 
-  if (!shouldReport) {
+  if (
+    scheduler.lastReportAt &&
+    (
+      now -
+      scheduler.lastReportAt
+    ) <
+      interval
+  ) {
 
     return false;
   }
 
 
-  const status =
-    await buildStatus(
+  const queue =
+    await listQueue(
       env,
       kv
     );
@@ -2574,51 +1774,41 @@ async function maybeSendHourlyReport(
 
   const text = [
 
-    `🤖 mynote_bot`,
-
-    `V14 HYBRID`,
+    "📊 گزارش وضعیت mynote_bot",
 
     ``,
 
-    `📅 گزارش دوره‌ای`,
+    `🕐 زمان: ${iso()}`,
 
-    `⏱ ${formatDate(now)}`,
+    `📦 صف: ${queue.length}`,
 
-    ``,
+    `📤 ارسال‌شده: ${scheduler.sent || 0}`,
 
-    `📥 دریافت‌شده: ${status.stats.received}`,
-
-    `📦 Queue: ${status.queue.count}`,
-
-    `📤 ارسال موفق: ${status.stats.sent}`,
-
-    `🔁 Retry: ${status.stats.retries}`,
-
-    `☠️ DLQ: ${status.dlq.count}`,
-
-    `❌ Failed: ${status.stats.failed}`,
-
-    ``,
-
-    `🕐 آخرین ارسال: ${formatDate(status.stats.lastSentAt)}`,
-
-    `📥 آخرین دریافت: ${formatDate(status.stats.lastReceivedAt)}`,
+    `❌ ناموفق: ${scheduler.failed || 0}`,
 
     `⏭ ارسال بعدی: ${
-      status.scheduler.nextSendAt || "—"
+      scheduler.nextSendAt
+        ? iso(
+            scheduler.nextSendAt
+          )
+        : "—"
     }`,
 
     ``,
 
-    `🔧 Cron: ${scheduler.lastCron || "—"}`,
+    `🔧 Cron: ${
+      scheduler.lastCron ||
+      "—"
+    }`,
 
     `🟢 Version: ${VERSION}`,
 
     ``,
 
-    status.stats.lastError
-      ? `⚠️ آخرین خطا:\n${status.stats.lastError}`
+    scheduler.lastError
+      ? `⚠️ آخرین خطا:\n${scheduler.lastError}`
       : `✅ آخرین وضعیت خطا: ندارد`
+
   ].join("\n");
 
 
@@ -2652,13 +1842,6 @@ async function maybeSendHourlyReport(
 
   } catch (error) {
 
-    /*
-      VERY IMPORTANT:
-
-      If Bale is temporarily unavailable,
-      we DO NOT break the Cron execution.
-    */
-
     console.error(
       JSON.stringify({
         event:
@@ -2689,15 +1872,8 @@ async function processCron(
     requireKV(env);
 
 
-  const cfg =
-    config(env);
-
-
-  /*
-    1. Finalize albums first.
-  */
-
-  let finalizedAlbums = 0;
+  let finalizedAlbums =
+    0;
 
 
   try {
@@ -2722,10 +1898,6 @@ async function processCron(
     );
   }
 
-
-  /*
-    2. Acquire lease lock.
-  */
 
   const lockToken =
     await acquireLock(
@@ -2758,6 +1930,7 @@ async function processCron(
     scheduler.lastCronAt =
       nowMs();
 
+
     scheduler.lastCron =
       controller?.cron ||
       "* * * * *";
@@ -2769,13 +1942,6 @@ async function processCron(
     );
 
 
-    /*
-      3. Hourly report.
-
-      It is inside the lock so two Cron invocations
-      cannot normally send duplicate reports.
-    */
-
     await maybeSendHourlyReport(
       env,
       kv,
@@ -2783,20 +1949,11 @@ async function processCron(
     );
 
 
-    /*
-      Reload scheduler because the report function
-      may have updated lastReportAt.
-    */
-
     scheduler =
       await getScheduler(
         kv
       );
 
-
-    /*
-      4. If queue is empty, do nothing.
-    */
 
     const queue =
       await listQueue(
@@ -2833,11 +1990,6 @@ async function processCron(
     }
 
 
-    /*
-      5. If no nextSendAt exists,
-         start the first random interval.
-    */
-
     if (
       !scheduler.nextSendAt ||
       scheduler.nextSendAt <= 0
@@ -2863,18 +2015,12 @@ async function processCron(
       console.log(
         JSON.stringify({
           event:
-            "SCHEDULE_CREATED",
+            "NEXT_SEND_SCHEDULED",
 
-          delaySeconds:
-            delay,
+          delay,
 
           nextSendAt:
-            iso(
-              scheduler.nextSendAt
-            ),
-
-          queue:
-            queue.length
+            scheduler.nextSendAt
         })
       );
 
@@ -2882,37 +2028,60 @@ async function processCron(
       return;
     }
 
-
-    /*
-      6. Not time yet.
-    */
 
     if (
       nowMs() <
       scheduler.nextSendAt
     ) {
 
-      console.log(
-        JSON.stringify({
-          event:
-            "WAITING_FOR_NEXT_SEND",
+      return;
+    }
 
-          queue:
-            queue.length,
 
-          nextSendAt:
-            iso(
-              scheduler.nextSendAt
-            ),
+    const candidate =
+      queue.find(
+        item => {
 
-          remainingSeconds:
-            Math.ceil(
+          if (
+            item.status ===
+            "pending"
+          ) {
+            return true;
+          }
+
+          if (
+            item.status ===
+            "retry"
+          ) {
+
+            return (
               (
-                scheduler.nextSendAt -
-                nowMs()
-              ) / 1000
-            )
-        })
+                Number(
+                  item.nextAttemptAt
+                ) || 0
+              ) <=
+              nowMs()
+            );
+          }
+
+          return false;
+        }
+      );
+
+
+    if (!candidate) {
+
+      scheduler.nextSendAt =
+        nowMs() +
+        randomDelaySeconds(
+          env
+        ) *
+        1000;
+
+
+      await saveScheduler(
+        kv,
+        scheduler
       );
 
 
@@ -2920,29 +2089,68 @@ async function processCron(
     }
 
 
-    /*
-      7. Send exactly one queue item.
-    */
+    candidate.status =
+      "processing";
+
+
+    candidate.processingAt =
+      nowMs();
+
+
+    await saveQueueItem(
+      env,
+      kv,
+      candidate
+    );
+
 
     const result =
-      await processOneQueueItem(
+      await processQueueItem(
         env,
         kv,
-        scheduler
+        candidate
       );
 
 
     scheduler =
-      result.scheduler ||
-      scheduler;
+      await getScheduler(
+        kv
+      );
 
 
-    scheduler.lastCronAt =
+    if (result.ok) {
+
+      scheduler.sent =
+        (
+          Number(
+            scheduler.sent
+          ) || 0
+        ) + 1;
+
+    } else {
+
+      scheduler.failed =
+        (
+          Number(
+            scheduler.failed
+          ) || 0
+        ) + 1;
+
+      scheduler.lastError =
+        result.error;
+    }
+
+
+    scheduler.lastSendAt =
       nowMs();
 
-    scheduler.lastCron =
-      controller?.cron ||
-      "* * * * *";
+
+    scheduler.nextSendAt =
+      nowMs() +
+      randomDelaySeconds(
+        env
+      ) *
+      1000;
 
 
     await saveScheduler(
@@ -2950,25 +2158,6 @@ async function processCron(
       scheduler
     );
 
-
-    console.log(
-      JSON.stringify({
-        event:
-          "CRON_COMPLETE",
-
-        status:
-          result.status,
-
-        finalizedAlbums,
-
-        nextSendAt:
-          scheduler.nextSendAt
-            ? iso(
-                scheduler.nextSendAt
-              )
-            : null
-      })
-    );
 
   } finally {
 
@@ -2981,7 +2170,7 @@ async function processCron(
 
 
 /* =========================================================
-   AUTHENTICATION FOR ADMIN ROUTES
+   ADMIN AUTHENTICATION
 ========================================================= */
 
 function isAdmin(
@@ -2994,7 +2183,6 @@ function isAdmin(
 
 
   if (!configured) {
-
     return false;
   }
 
@@ -3009,13 +2197,14 @@ function isAdmin(
     auth ===
     `Bearer ${configured}`
   ) {
-
     return true;
   }
 
 
   const url =
-    new URL(request.url);
+    new URL(
+      request.url
+    );
 
 
   const key =
@@ -3024,12 +2213,13 @@ function isAdmin(
     );
 
 
-  return key === configured;
+  return key ===
+    configured;
 }
 
 
 /* =========================================================
-   ADMIN: RESET SCHEDULER
+   ADMIN RESET
 ========================================================= */
 
 async function adminResetScheduler(
@@ -3037,18 +2227,29 @@ async function adminResetScheduler(
   kv
 ) {
 
-  const scheduler =
-    await getScheduler(
-      kv
-    );
+  const scheduler = {
 
+    nextSendAt:
+      0,
 
-  scheduler.nextSendAt =
-    0;
+    lastSendAt:
+      0,
 
+    lastReportAt:
+      0,
 
-  scheduler.lastError =
-    null;
+    lastCronAt:
+      0,
+
+    lastCron:
+      "",
+
+    sent:
+      0,
+
+    failed:
+      0
+  };
 
 
   await saveScheduler(
@@ -3059,15 +2260,13 @@ async function adminResetScheduler(
 
   return {
     ok: true,
-
-    message:
-      "Scheduler reset. Next Cron will create a new random 3–10 minute delay."
+    scheduler
   };
 }
 
 
 /* =========================================================
-   ADMIN: REQUEUE DLQ
+   ADMIN REQUEUE DLQ
 ========================================================= */
 
 async function adminRequeueDLQ(
@@ -3075,88 +2274,77 @@ async function adminRequeueDLQ(
   kv
 ) {
 
-  const cfg =
-    config(env);
-
-
-  const listed =
+  const list =
     await kv.list({
       prefix:
-        KEYS.dlqPrefix,
-
-      limit:
-        cfg.MAX_QUEUE_SCAN
+        "dlq:",
+      limit: 1000
     });
 
 
-  let restored =
-    0;
+  let count = 0;
 
 
   for (
-    const keyInfo of listed.keys
+    const key of
+    list.keys
   ) {
 
-    const dlq =
+    const item =
       await kvGetJSON(
         kv,
-        keyInfo.name
+        key.name
       );
 
 
-    if (!dlq?.original) {
+    if (!item) {
       continue;
     }
 
 
-    const original =
-      dlq.original;
-
-
-    original.state =
+    item.status =
       "pending";
 
-    original.retryAt =
+
+    item.retryCount =
       0;
 
-    original.attempts =
+
+    item.nextAttemptAt =
       0;
 
-    original.requeuedAt =
-      nowMs();
+
+    item.lastError =
+      null;
 
 
-    await kvPutJSON(
+    await saveQueueItem(
+      env,
       kv,
-      queueKey(
-        Number(
-          original.createdAt
-        ) || nowMs()
-      ),
-      original
+      item
     );
 
 
     await kvDelete(
       kv,
-      keyInfo.name
+      key.name
     );
 
 
-    restored += 1;
+    count++;
   }
 
 
   return {
     ok: true,
-
-    restored
+    requeued:
+      count
   };
 }
 
 
 /* =========================================================
-   ADMIN: SET TELEGRAM WEBHOOK
+   ADMIN: SET BALE WEBHOOK
 ========================================================= */
 
 async function adminSetWebhook(
@@ -3164,19 +2352,27 @@ async function adminSetWebhook(
   env
 ) {
 
-  const publicUrl =
-    env.PUBLIC_WORKER_URL;
+  /*
+    Prefer explicitly configured public URL.
+    Otherwise derive it from the request
+    that reached this Worker.
 
+    This means PUBLIC_WORKER_URL is optional.
+  */
 
-  if (!publicUrl) {
-
-    throw new Error(
-      "PUBLIC_WORKER_URL is not configured."
+  const requestUrl =
+    new URL(
+      request.url
     );
-  }
+
+
+  const publicUrl =
+    env.PUBLIC_WORKER_URL ||
+    requestUrl.origin;
 
 
   const secret =
+    env.BALE_WEBHOOK_SECRET ||
     env.TELEGRAM_WEBHOOK_SECRET;
 
 
@@ -3185,7 +2381,7 @@ async function adminSetWebhook(
       /\/$/,
       ""
     ) +
-    "/telegram/webhook";
+    "/webhook";
 
 
   const payload = {
@@ -3194,7 +2390,9 @@ async function adminSetWebhook(
       webhookUrl,
 
     allowed_updates:
-      ["channel_post"],
+      [
+        "channel_post"
+      ],
 
     drop_pending_updates:
       false
@@ -3222,7 +2420,33 @@ async function adminSetWebhook(
 
     webhookUrl,
 
-    telegram:
+    bale:
+      result
+  };
+}
+
+
+/* =========================================================
+   ADMIN: GET BALE WEBHOOK INFO
+========================================================= */
+
+async function adminWebhookInfo(
+  env
+) {
+
+  const result =
+    await telegramAPI(
+      env,
+      "getWebhookInfo",
+      {}
+    );
+
+
+  return {
+
+    ok: true,
+
+    bale:
       result
   };
 }
@@ -3241,16 +2465,18 @@ export default {
   ) {
 
     const url =
-      new URL(request.url);
+      new URL(
+        request.url
+      );
 
 
     const path =
       url.pathname;
 
 
-    /*
-      HEALTH
-    */
+    /* =====================================================
+       HEALTH
+    ===================================================== */
 
     if (
       path ===
@@ -3258,6 +2484,7 @@ export default {
     ) {
 
       return Response.json({
+
         ok: true,
 
         version:
@@ -3269,13 +2496,13 @@ export default {
     }
 
 
-    /*
-      TELEGRAM WEBHOOK
-    */
+    /* =====================================================
+       BALE WEBHOOK
+    ===================================================== */
 
     if (
-      path ===
-      "/telegram/webhook"
+      path === "/webhook" ||
+      path === "/telegram/webhook"
     ) {
 
       if (
@@ -3294,23 +2521,17 @@ export default {
 
       try {
 
-        /*
-          We deliberately await this.
-
-          If KV fails, returning 500 allows Telegram
-          to retry the webhook instead of silently
-          losing the post.
-        */
-
-        return await handleTelegramUpdate(
-          request,
-          env
-        );
+        return await
+          handleTelegramUpdate(
+            request,
+            env
+          );
 
       } catch (error) {
 
         console.error(
           JSON.stringify({
+
             event:
               "WEBHOOK_PROCESSING_ERROR",
 
@@ -3327,10 +2548,12 @@ export default {
 
         return Response.json(
           {
+
             ok: false,
 
             error:
               "Webhook processing failed."
+
           },
           {
             status: 500
@@ -3340,13 +2563,13 @@ export default {
     }
 
 
-    /*
-      ADMIN STATUS
-    */
+    /* =====================================================
+       ADMIN WEBHOOK INFO
+    ===================================================== */
 
     if (
       path ===
-      "/admin/status"
+      "/admin/webhook-info"
     ) {
 
       if (
@@ -3366,75 +2589,10 @@ export default {
 
 
       try {
-
-        const kv =
-          requireKV(env);
-
-
-        const status =
-          await buildStatus(
-            env,
-            kv
-          );
-
-
-        return Response.json(
-          status
-        );
-
-      } catch (error) {
-
-        return Response.json(
-          {
-            ok: false,
-
-            error:
-              error?.message ||
-              String(error)
-          },
-          {
-            status: 500
-          }
-        );
-      }
-    }
-
-
-    /*
-      ADMIN RESET
-    */
-
-    if (
-      path ===
-      "/admin/reset"
-    ) {
-
-      if (
-        !isAdmin(
-          request,
-          env
-        )
-      ) {
-
-        return new Response(
-          "Unauthorized",
-          {
-            status: 401
-          }
-        );
-      }
-
-
-      try {
-
-        const kv =
-          requireKV(env);
-
 
         const result =
-          await adminResetScheduler(
-            env,
-            kv
+          await adminWebhookInfo(
+            env
           );
 
 
@@ -3446,11 +2604,13 @@ export default {
 
         return Response.json(
           {
+
             ok: false,
 
             error:
               error?.message ||
               String(error)
+
           },
           {
             status: 500
@@ -3460,69 +2620,9 @@ export default {
     }
 
 
-    /*
-      ADMIN REQUEUE DLQ
-    */
-
-    if (
-      path ===
-      "/admin/requeue-dlq"
-    ) {
-
-      if (
-        !isAdmin(
-          request,
-          env
-        )
-      ) {
-
-        return new Response(
-          "Unauthorized",
-          {
-            status: 401
-          }
-        );
-      }
-
-
-      try {
-
-        const kv =
-          requireKV(env);
-
-
-        const result =
-          await adminRequeueDLQ(
-            env,
-            kv
-          );
-
-
-        return Response.json(
-          result
-        );
-
-      } catch (error) {
-
-        return Response.json(
-          {
-            ok: false,
-
-            error:
-              error?.message ||
-              String(error)
-          },
-          {
-            status: 500
-          }
-        );
-      }
-    }
-
-
-    /*
-      ADMIN SET WEBHOOK
-    */
+    /* =====================================================
+       ADMIN SET WEBHOOK
+    ===================================================== */
 
     if (
       path ===
@@ -3562,11 +2662,13 @@ export default {
 
         return Response.json(
           {
+
             ok: false,
 
             error:
               error?.message ||
               String(error)
+
           },
           {
             status: 500
@@ -3576,9 +2678,201 @@ export default {
     }
 
 
-    /*
-      ROOT
-    */
+    /* =====================================================
+       ADMIN STATUS
+    ===================================================== */
+
+    if (
+      path ===
+      "/admin/status"
+    ) {
+
+      if (
+        !isAdmin(
+          request,
+          env
+        )
+      ) {
+
+        return new Response(
+          "Unauthorized",
+          {
+            status: 401
+          }
+        );
+      }
+
+
+      try {
+
+        const kv =
+          requireKV(
+            env
+          );
+
+
+        const status =
+          await buildStatus(
+            env,
+            kv
+          );
+
+
+        return Response.json(
+          status
+        );
+
+      } catch (error) {
+
+        return Response.json(
+          {
+
+            ok: false,
+
+            error:
+              error?.message ||
+              String(error)
+
+          },
+          {
+            status: 500
+          }
+        );
+      }
+    }
+
+
+    /* =====================================================
+       ADMIN RESET
+    ===================================================== */
+
+    if (
+      path ===
+      "/admin/reset"
+    ) {
+
+      if (
+        !isAdmin(
+          request,
+          env
+        )
+      ) {
+
+        return new Response(
+          "Unauthorized",
+          {
+            status: 401
+          }
+        );
+      }
+
+
+      try {
+
+        const kv =
+          requireKV(
+            env
+          );
+
+
+        const result =
+          await adminResetScheduler(
+            env,
+            kv
+          );
+
+
+        return Response.json(
+          result
+        );
+
+      } catch (error) {
+
+        return Response.json(
+          {
+
+            ok: false,
+
+            error:
+              error?.message ||
+              String(error)
+
+          },
+          {
+            status: 500
+          }
+        );
+      }
+    }
+
+
+    /* =====================================================
+       ADMIN REQUEUE DLQ
+    ===================================================== */
+
+    if (
+      path ===
+      "/admin/requeue-dlq"
+    ) {
+
+      if (
+        !isAdmin(
+          request,
+          env
+        )
+      ) {
+
+        return new Response(
+          "Unauthorized",
+          {
+            status: 401
+          }
+        );
+      }
+
+
+      try {
+
+        const kv =
+          requireKV(
+            env
+          );
+
+
+        const result =
+          await adminRequeueDLQ(
+            env,
+            kv
+          );
+
+
+        return Response.json(
+          result
+        );
+
+      } catch (error) {
+
+        return Response.json(
+          {
+
+            ok: false,
+
+            error:
+              error?.message ||
+              String(error)
+
+          },
+          {
+            status: 500
+          }
+        );
+      }
+    }
+
+
+    /* =====================================================
+       ROOT
+    ===================================================== */
 
     if (
       path ===
@@ -3596,7 +2890,7 @@ export default {
           VERSION,
 
         architecture:
-          "V14 Hybrid",
+          "V14 Hybrid Bale",
 
         cron:
           "* * * * *",
@@ -3618,6 +2912,18 @@ export default {
 
         hourlyBaleReport:
           true,
+
+        webhookEndpoint:
+          "/webhook",
+
+        legacyWebhookEndpoint:
+          "/telegram/webhook",
+
+        webhookSetup:
+          "/admin/set-webhook",
+
+        webhookInfo:
+          "/admin/webhook-info",
 
         statusEndpoint:
           "/admin/status"
@@ -3644,19 +2950,6 @@ export default {
     ctx
   ) {
 
-    /*
-      CRITICAL:
-
-      The previous version allowed an exception from
-      KV to escape scheduled().
-
-      That caused Cloudflare Cron to show:
-
-      outcome: exception
-
-      V14 catches the complete scheduled pipeline.
-    */
-
     try {
 
       await processCron(
@@ -3668,6 +2961,7 @@ export default {
 
       console.error(
         JSON.stringify({
+
           event:
             "SCHEDULED_FATAL_ERROR",
 
@@ -3690,13 +2984,6 @@ export default {
         })
       );
 
-
-      /*
-        Do not allow a single bad Cron execution
-        to become a permanently broken scheduler.
-
-        The next Cron will execute normally.
-      */
 
       try {
 
