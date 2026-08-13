@@ -1,15 +1,13 @@
 /* =====================================================
-   mynote_bot — V15 SIMPLE & RELIABLE
-   کانال مبدأ → کانال مقصد (بله) — ساده و قابل‌تست
+   mynote_bot — V15.1 OPEN SOURCE (بدون دروازهٔ مبدأ)
 ===================================================== */
-const VERSION = "V15-SIMPLE-2026-08-14";
+const VERSION = "V15.1-OPEN-2026-08-14";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 
 function cfg(env) {
   return {
-    source: String(env.SOURCE_CHANNEL_ID || env.SOURCE_CHAT_ID || ""),
-    dest:   String(env.DEST_CHANNEL_ID || env.DESTINATION_CHAT_ID || env.TARGET_CHAT_ID || ""),
-    admin:  String(env.ADMIN_ID || ""),
+    dest: String(env.DEST_CHANNEL_ID || env.DESTINATION_CHAT_ID || env.TARGET_CHAT_ID || ""),
+    admin: String(env.ADMIN_ID || ""),
     windowOn: String(env.SEND_WINDOW || "off") === "on",
     delaySec: Math.max(0, Number(env.SEND_DELAY_SEC || 0))
   };
@@ -21,7 +19,7 @@ function iranMinutes() {
 function inWindow(c) {
   if (!c.windowOn) return true;
   const m = iranMinutes();
-  return m >= 510 && m <= 1350; // ۸:۳۰ تا ۲:۳۰
+  return m >= 510 && m <= 1350;
 }
 
 async function bale(env, method, payload) {
@@ -76,12 +74,16 @@ async function onWebhook(request, env, KV) {
   if (seenKey && (await KV.get(seenKey))) return json({ ok: true, duplicate: true });
 
   const msg = body.channel_post;
-  if (!msg) return json({ ok: true, ignored: true });
-
-  if (false && c.source && String(msg.chat.id) !== c.source) {
-    console.log(JSON.stringify({ event: "SOURCE_MISMATCH", expected: c.source, got: String(msg.chat.id) }));
-    return json({ ok: true, ignored: true, reason: "source_mismatch" });
+  if (!msg) {
+    console.log(JSON.stringify({ event: "NO_CHANNEL_POST", keys: Object.keys(body) }));
+    return json({ ok: true, ignored: true });
   }
+
+  // ضدلوپ: پست‌های خودِ کانال مقصد رو نادیده بگیر
+  if (c.dest && String(msg.chat.id) === c.dest) {
+    return json({ ok: true, ignored: true, reason: "dest_echo" });
+  }
+  console.log(JSON.stringify({ event: "RECEIVED", chatId: String(msg.chat.id), mid: msg.message_id }));
 
   const s = await getStats(KV);
   s.received += 1;
@@ -149,7 +151,7 @@ async function onCron(env, KV) {
   const last = Number(await KV.get("report15") || 0);
   if (c.admin && Date.now() - last >= 3600 * 1000) {
     const q = await qList(KV);
-    const txt = "📊 گزارش mynote_bot (V15)\n\n📥 دریافتی: " + s.received + "\n📤 ارسال موفق: " + s.sent + "\n❌ ناموفق: " + s.failed + "\n📦 صف: " + q.length + "\n\n" + (s.lastError ? "⚠️ آخرین خطا: " + s.lastError : "✅ بدون خطا");
+    const txt = "📊 گزارش mynote_bot (V15.1)\n\n📥 دریافتی: " + s.received + "\n📤 ارسال موفق: " + s.sent + "\n❌ ناموفق: " + s.failed + "\n📦 صف: " + q.length + "\n\n" + (s.lastError ? "⚠️ آخرین خطا: " + s.lastError : "✅ بدون خطا");
     try {
       await bale(env, "sendMessage", { chat_id: c.admin, text: txt });
       await KV.put("report15", String(Date.now()), { expirationTtl: 2592000 });
