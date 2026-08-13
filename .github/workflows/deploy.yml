@@ -14,11 +14,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler@3 deploy
+        env:
+          CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
+          CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_GLOBAL_API_KEY }}
 
       - name: Set Bot Token Secret
-        run: echo "${{ secrets.BALE_BOT_TOKEN }}" | npx wrangler secret put BALE_BOT_TOKEN --name mynote-worker
+        run: echo "${{ secrets.BALE_BOT_TOKEN }}" | npx wrangler@3 secret put BALE_BOT_TOKEN --name mynote-worker
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
+          CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_GLOBAL_API_KEY }}
