@@ -1,7 +1,9 @@
 /* =====================================================
-   mynote_bot — V15.1 OPEN SOURCE (بدون دروازهٔ مبدأ)
+   mynote_bot — V15.2 UNIVERSAL (قبول همه پیام‌ها)
+   - channel_post (پست کانال)
+   - message (چت خصوصی / گروه)
 ===================================================== */
-const VERSION = "V15.1-OPEN-2026-08-14";
+const VERSION = "V15.2-UNIVERSAL-2026-08-14";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 
 function cfg(env) {
@@ -73,28 +75,41 @@ async function onWebhook(request, env, KV) {
   const seenKey = body.update_id != null ? "seen15:" + body.update_id : null;
   if (seenKey && (await KV.get(seenKey))) return json({ ok: true, duplicate: true });
 
-  const msg = body.channel_post;
+  // ✅ UNIVERSAL: قبول channel_post و message
+  const msg = body.channel_post || body.message;
   if (!msg) {
-    console.log(JSON.stringify({ event: "NO_CHANNEL_POST", keys: Object.keys(body) }));
+    console.log(JSON.stringify({ event: "UNKNOWN_UPDATE", keys: Object.keys(body) }));
     return json({ ok: true, ignored: true });
   }
 
-  // ضدلوپ: پست‌های خودِ کانال مقصد رو نادیده بگیر
-  if (c.dest && String(msg.chat.id) === c.dest) {
+  const chatId = String(msg.chat.id);
+  const chatType = msg.chat.type; // private, group, channel, supergroup
+
+  // ضدلوپ: اگه پست از خود کانال مقصد اومد، نادیده بگیر
+  if (c.dest && chatId === c.dest) {
     return json({ ok: true, ignored: true, reason: "dest_echo" });
   }
-  console.log(JSON.stringify({ event: "RECEIVED", chatId: String(msg.chat.id), mid: msg.message_id }));
+
+  console.log(JSON.stringify({
+    event: "RECEIVED",
+    kind: body.channel_post ? "channel_post" : "message",
+    chatType: chatType,
+    chatId: chatId,
+    mid: msg.message_id
+  }));
 
   const s = await getStats(KV);
   s.received += 1;
   await saveStats(KV, s);
 
   const item = {
-    id: msg.chat.id + "-" + msg.message_id,
-    from: String(msg.chat.id),
+    id: chatId + "-" + msg.message_id,
+    from: chatId,
     mid: Number(msg.message_id),
     at: Date.now() + c.delaySec * 1000,
-    retry: 0
+    retry: 0,
+    kind: body.channel_post ? "channel_post" : "message",
+    chatType: chatType
   };
 
   let result = null;
@@ -104,7 +119,7 @@ async function onWebhook(request, env, KV) {
       s.sent += 1; s.lastSentAt = Date.now(); s.lastError = null;
       await saveStats(KV, s);
       result = { ok: true, sent: true };
-      console.log(JSON.stringify({ event: "SENT_IMMEDIATE", mid: item.mid }));
+      console.log(JSON.stringify({ event: "SENT_IMMEDIATE", mid: item.mid, from: chatId }));
     } catch (e) {
       s.lastError = e.message;
       await saveStats(KV, s);
@@ -139,7 +154,7 @@ async function onCron(env, KV) {
         if (it.retry >= 6) {
           await qDel(KV, Q + it.id);
           await KV.put("dlq15:" + it.id, JSON.stringify(it), { expirationTtl: 2592000 });
-          if (c.admin) bale(env, "sendMessage", { chat_id: c.admin, text: "☠️ ارسال ناموفق (۶ تلاش):\nپیام " + it.mid + "\n" + e.message }).catch(() => {});
+          if (c.admin) bale(env, "sendMessage", { chat_id: c.admin, text: "☠️ ارسال ناموفق (۶ تلاش):\nپیام " + it.mid + "\n" + e.message).catch(() => {});
         } else {
           it.at = now + Math.min(3600, 60 * it.retry) * 1000;
           await qPush(KV, it);
@@ -151,7 +166,7 @@ async function onCron(env, KV) {
   const last = Number(await KV.get("report15") || 0);
   if (c.admin && Date.now() - last >= 3600 * 1000) {
     const q = await qList(KV);
-    const txt = "📊 گزارش mynote_bot (V15.1)\n\n📥 دریافتی: " + s.received + "\n📤 ارسال موفق: " + s.sent + "\n❌ ناموفق: " + s.failed + "\n📦 صف: " + q.length + "\n\n" + (s.lastError ? "⚠️ آخرین خطا: " + s.lastError : "✅ بدون خطا");
+    const txt = "📊 گزارش mynote_bot (V15.2)\n\n📥 دریافتی: " + s.received + "\n📤 ارسال موفق: " + s.sent + "\n❌ ناموفق: " + s.failed + "\n📦 صف: " + q.length + "\n\n" + (s.lastError ? "⚠️ آخرین خطا: " + s.lastError : "✅ بدون خطا");
     try {
       await bale(env, "sendMessage", { chat_id: c.admin, text: txt });
       await KV.put("report15", String(Date.now()), { expirationTtl: 2592000 });
