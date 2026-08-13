@@ -1,6 +1,7 @@
 name = "mynote-worker"
 main = "worker.js"
 compatibility_date = "2024-09-01"
+account_id = "c3d95c783bd334edd94c13fb99b5f413"
 
 [vars]
 ADMIN_ID = "6130223429"
