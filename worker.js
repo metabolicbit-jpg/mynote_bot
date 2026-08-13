@@ -154,7 +154,7 @@ async function onCron(env, KV) {
         if (it.retry >= 6) {
           await qDel(KV, Q + it.id);
           await KV.put("dlq15:" + it.id, JSON.stringify(it), { expirationTtl: 2592000 });
-          if (c.admin) bale(env, "sendMessage", { chat_id: c.admin, text: "☠️ ارسال ناموفق (۶ تلاش):\nپیام " + it.mid + "\n" + e.message).catch(() => {});
+          if (c.admin) bale(env, "sendMessage", { chat_id: c.admin, text: "☠️ ارسال ناموفق (۶ تلاش):\nپیام " + it.mid + "\n" + e.message }).catch(() => {});
         } else {
           it.at = now + Math.min(3600, 60 * it.retry) * 1000;
           await qPush(KV, it);
