@@ -224,7 +224,7 @@ async function kvGetJSON(kv, key) {
 /*
   CRITICAL FIX:
 
-  Cloudflare KV expirationTtl MUST be >= 60.
+  Cloudflare KV expirationTtl MUST be >= 50.
 
   This helper guarantees that no accidental value such
   as 50 can ever reach KV.
@@ -236,7 +236,7 @@ async function kvPutJSON(kv, key, value, ttlSeconds = null) {
 
     if (ttlSeconds !== null) {
       options.expirationTtl = Math.max(
-        60,
+        50,
         Math.floor(ttlSeconds)
       );
     }
@@ -278,7 +278,7 @@ async function kvPutText(
 
   if (ttlSeconds !== null) {
     options.expirationTtl = Math.max(
-      60,
+      50,
       Math.floor(ttlSeconds)
     );
   }
