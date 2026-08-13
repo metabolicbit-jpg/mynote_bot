@@ -12,3 +12,20 @@ SOURCE_CHANNEL_ID = "5430321300"
 [[kv_namespaces]]
 binding = "MYNOTE_KV"
 id = "c0e487e2c5da4e46a61ce8dd2965ea96"
+
+[triggers]
+crons = ["*/1 * * * *"]
+
+[observability]
+enabled = false
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1
