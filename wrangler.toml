@@ -11,7 +11,7 @@ account_id = "c3d95c783bd334edd94c13fb99b5f413"
 SOURCE_CHANNEL_ID = "4743880175"
 DEST_CHANNEL_ID = "5235764517"
 DEST_CHANNEL_USERNAME = "yadbegirim"
-ADMIN_ID = "6130223429"
+ADMIN_ID = "1381797564"
 
 # کلید ادمین برای endpoint های /admin/*
 # (یه رمز قوی و تصادفی بذار - همین جا بمونه، هیچ‌جا دیگه نذار)
