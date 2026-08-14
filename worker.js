@@ -1,13 +1,15 @@
 /* ============================================================
-   mynote_bot — V19 TAG-MENU
+   mynote_bot — V19.1 TAG-MENU + WEBHOOK-MGMT
    - V18 + سیستم مدیریت هشتگ داخل خود بات
    - منوی تو در تو (Home → 🏷️ → زیرمنو)
    - بانک هشتگ در KV (معمولی + JSON خودکار)
    - نرمال‌سازی (کشیده/ی ک عربی)
    - دکمه 🔍 تست هشتگ
    - دکمه ❌ لغو = برگشت به خانه
+   - تشخیص کلمات جدید vs به‌روزرسانی
+   - مدیریت وب‌هوک از داخل بات
 ============================================================ */
-const VERSION = "V19-TAG-MENU-2026-08-14";
+const VERSION = "V19.1-TAG-MENU-2026-08-14";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 
 const DEFAULTS = {
@@ -638,6 +640,7 @@ async function handleTagAdmin(env, kv, c, msg) {
   const state = await getState(kv, chatId);
   if (!state) return false;
 
+  // ==== حالت افزودن کلمه (با تفکیک جدید vs به‌روزرسانی) ====
   if (state.mode === "adding") {
     const parsed = parseAddInput(text);
     if (!parsed.length) {
@@ -645,15 +648,35 @@ async function handleTagAdmin(env, kv, c, msg) {
       return true;
     }
     const bank = await loadHashtagBank(kv);
-    for (const p of parsed) bank.keywords[p.keyword] = p.tags;
+    const newWords = [];
+    const updatedWords = [];
+    for (const p of parsed) {
+      if (bank.keywords[p.keyword]) {
+        updatedWords.push(p);
+      } else {
+        newWords.push(p);
+      }
+      bank.keywords[p.keyword] = p.tags;
+    }
     await saveHashtagBank(kv, bank);
     await setState(kv, chatId, null);
-    const preview = parsed.slice(0, 5).map(p => `• ${p.keyword} → ${p.tags.join(" ")}`).join("\n");
-    const extra = parsed.length > 5 ? `\n... و ${parsed.length - 5} مورد دیگر` : "";
-    await adminSay(env, chatId,
-      `✅ ${parsed.length} کلمه به بانک اضافه/به‌روزرسانی شد.\n\n${preview}${extra}\n\nاز پست بعدی استفاده می‌شه 🎯`,
-      MENUS.hashtag.rows
-    );
+    
+    // ساخت پیام دقیق‌تر
+    let msgText = "";
+    if (newWords.length > 0) {
+      msgText += `✅ ${newWords.length} کلمه **جدید** اضافه شد:\n`;
+      msgText += newWords.slice(0, 3).map(p => `• ${p.keyword} → ${p.tags.join(" ")}`).join("\n");
+      if (newWords.length > 3) msgText += `\n... و ${newWords.length - 3} مورد دیگر`;
+      msgText += "\n\n";
+    }
+    if (updatedWords.length > 0) {
+      msgText += `🔄 ${updatedWords.length} کلمه **به‌روزرسانی** شد:\n`;
+      msgText += updatedWords.slice(0, 3).map(p => `• ${p.keyword} → ${p.tags.join(" ")}`).join("\n");
+      if (updatedWords.length > 3) msgText += `\n... و ${updatedWords.length - 3} مورد دیگر`;
+      msgText += "\n\n";
+    }
+    msgText += `از پست بعدی استفاده می‌شه 🎯`;
+    await adminSay(env, chatId, msgText, MENUS.hashtag.rows);
     return true;
   }
 
@@ -718,11 +741,28 @@ async function onWebhook(request, env) {
   const msg = body?.channel_post || body?.message;
   if (!msg) return new Response(JSON.stringify({ ok: true, ignored: true }), { headers: { "Content-Type": "application/json" } });
 
-  // ===== مدیر هشتگ: فقط چت خصوصی ادمین =====
-  if (c.admin && String(msg.chat.id) === c.admin && String(msg.chat.type || "") === "private") {
-    const handled = await handleTagAdmin(env, KV, c, msg);
-    if (handled) {
-      return new Response(JSON.stringify({ ok: true, admin: true }), { headers: { "Content-Type": "application/json" } });
+  // ===== لاگ دیباگ برای پیام‌های ادمین =====
+  const chatId = String(msg.chat?.id || "");
+  const chatType = String(msg.chat?.type || "");
+  if (chatId === c.admin) {
+    console.log(JSON.stringify({
+      event: "ADMIN_MESSAGE",
+      chatId, chatType,
+      text: (msg.text || "").substring(0, 50),
+      isAdmin: chatId === c.admin
+    }));
+  }
+
+  // ===== مدیر هشتگ: چت خصوصی ادمین (بدون چک سخت‌گیرانه chat.type) =====
+  if (c.admin && chatId === c.admin) {
+    // اگر از کانال مقصد اومده، رد کن (لوپ)
+    if (c.dest && chatId === c.dest) {
+      // نادیده بگیر
+    } else {
+      const handled = await handleTagAdmin(env, KV, c, msg);
+      if (handled) {
+        return new Response(JSON.stringify({ ok: true, admin: true }), { headers: { "Content-Type": "application/json" } });
+      }
     }
   }
 
@@ -824,7 +864,7 @@ async function onCron(env) {
     if (c.admin && now - (s.lastReportAt || 0) >= c.reportInt * 1000) {
       const q = await listPrefix(KV, QP, 1000);
       const d = await listPrefix(KV, DP, 100);
-      const txt = `📊 گزارش mynote_bot (V19)\n\n🕐 ${iso()}\n⏰ بازه: ${String(Math.floor(c.windowStart / 60)).padStart(2, "0")}:${String(c.windowStart % 60).padStart(2, "0")} تا ${String(Math.floor(c.windowEnd / 60)).padStart(2, "0")}:${String(c.windowEnd % 60).padStart(2, "0")}\n🧹 تمیزکاری: ${c.cleanCaptions ? "روشن" : "خاموش"}\n\n📥 دریافتی: ${s.received}\n📤 ارسال موفق: ${s.sent}\n🔁 Retry: ${s.retries}\n☠️ DLQ: ${d.length}\n❌ Failed: ${s.failed}\n📦 صف: ${q.length}\n⏭ ارسال بعدی: ${s.nextSendAt ? iso(s.nextSendAt) : "—"}\n\n${s.lastError ? "⚠️ خطا: " + s.lastError : "✅ بدون خطا"}`;
+      const txt = `📊 گزارش mynote_bot (V19.1)\n\n🕐 ${iso()}\n⏰ بازه: ${String(Math.floor(c.windowStart / 60)).padStart(2, "0")}:${String(c.windowStart % 60).padStart(2, "0")} تا ${String(Math.floor(c.windowEnd / 60)).padStart(2, "0")}:${String(c.windowEnd % 60).padStart(2, "0")}\n🧹 تمیزکاری: ${c.cleanCaptions ? "روشن" : "خاموش"}\n\n📥 دریافتی: ${s.received}\n📤 ارسال موفق: ${s.sent}\n🔁 Retry: ${s.retries}\n☠️ DLQ: ${d.length}\n❌ Failed: ${s.failed}\n📦 صف: ${q.length}\n⏭ ارسال بعدی: ${s.nextSendAt ? iso(s.nextSendAt) : "—"}\n\n${s.lastError ? "⚠️ خطا: " + s.lastError : "✅ بدون خطا"}`;
       try {
         await bale(env, "sendMessage", { chat_id: c.admin, text: txt });
         s.lastReportAt = now;
@@ -975,6 +1015,40 @@ export default {
     if (p === "/admin/tags") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       return json({ ok: true, bank: await loadHashtagBank(KV) });
+    }
+
+    // ===== مدیریت وب‌هوک =====
+    if (p === "/admin/set-webhook") {
+      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
+      const webhookUrl = "https://mynote-worker.metabolicbit.workers.dev/webhook";
+      try {
+        const res = await fetch(BALE_BASE + token + "/setWebhook", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: webhookUrl,
+            allowed_updates: ["message", "channel_post", "edited_channel_post"],
+            drop_pending_updates: false
+          })
+        });
+        const data = await res.json();
+        return json({ ok: true, webhook: webhookUrl, result: data });
+      } catch (e) {
+        return json({ ok: false, error: e.message }, 500);
+      }
+    }
+    
+    if (p === "/admin/webhook-info") {
+      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
+      try {
+        const res = await fetch(BALE_BASE + token + "/getWebhookInfo");
+        const data = await res.json();
+        return json({ ok: true, info: data });
+      } catch (e) {
+        return json({ ok: false, error: e.message }, 500);
+      }
     }
 
     if (p === "/") {
