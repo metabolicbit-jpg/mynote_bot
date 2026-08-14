@@ -1,7 +1,7 @@
 /* ============================================================
    mynote_bot — V17 CLEAN + SCHEDULE + ALBUM + SOURCE-CLEAN
    ترکیبی از:
-   - V1.9/V1.10: تمیزکاری کپشن، حذف لینک، هشتگ هوشمند
+   - V1.9/V1.10: تمیز کاری کپشن، حذف لینک، هشتگ هوشمند
    - V14: صف مستقل، Retry با backoff، DLQ، Album aggregation
    - V15.2: API بله، پشتیبانی از channel_post + message
    - V16: Auto-learn source، پنجرهٔ ساعتی قابل تنظیم
