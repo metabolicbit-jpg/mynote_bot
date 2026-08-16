@@ -1,9 +1,10 @@
 /* ============================================================
-   mynote_bot — V20 STABLE (syntax-fixed)
+   mynote_bot — V20 STABLE (URL params support)
    - پیشوند ثابت KV (mynote:) → حفظ state بین دیپلوی‌ها
    - تمیزکاری امن ایموجی (regex با پرچم u + جاروی خرده‌ها)
    - بانک هشتگ در KV + منوی داخل بات
    - قوانین تمیزکاری سفارشی در KV
+   - پشتیبانی از URL parameter برای endpoint های ادمین
    - توکن مخفی وب‌هوک (اختیاری)
    - مهاجرت دسته‌ای v19 → stable
    - پنجرهٔ ۸:۳۰–۲۲:۳۰ + فاصلهٔ تصادفی ۳–۱۰ دقیقه
@@ -101,9 +102,6 @@ function normalizeText(t) {
     .trim();
 }
 
-/* ============================================================
-   🧹 تمیزکاری امن (بدون خردهٔ ایموجی)
-============================================================ */
 function cleanText(text, entities) {
   if (!text) return "";
   let t = text;
@@ -123,11 +121,11 @@ function cleanText(text, entities) {
     l = l.replace(/https?:\/\/[^\s]+/g, "");
     l = l.replace(/ble\.ir\/[^\s]*/g, "");
     l = l.replace(/t\.me\/[^\s]*/g, "");
-    l = l.replace(/[Ⓜ🅰🆎🅾]/gu, "");
+    l = l.replace(/[Ⓜ🅱🅾]/gu, "");
     l = l.replace(/@[a-zA-Z0-9_]+/g, "");
     l = l.replace(/#[^\s]+/g, "");
     l = l.replace(/[\*]+/g, "");
-    l = l.replace(/[➖➕🔻🔸▫️▪️◽◾•●○✓✗]/gu, "");
+    l = l.replace(/[➖➕🔸▫️▪️◽◾•●○✓✗]/gu, "");
     l = l.replace(/\uFFFD/g, "");
     l = l.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "");
     l = l.replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
@@ -146,9 +144,6 @@ function cleanText(text, entities) {
   return lines.filter(function (x) { return x.length > 0; }).join("\n").trim();
 }
 
-/* ============================================================
-   🏷️ بانک هشتگ
-============================================================ */
 async function loadHashtagBank(kv) {
   try {
     const bank = await kv.get(HASHTAG_BANK_KEY, "json");
@@ -189,9 +184,6 @@ async function buildCaption(kv, rawCaption, entities, destUsername) {
   return clean + "\n\n📌 منبع: @" + destUsername + "\n\n" + tags;
 }
 
-/* ============================================================
-   🎛️ قوانین سفارشی
-============================================================ */
 async function loadCleaningRules(kv) {
   try {
     return (await kv.get("mynote:cleaning_rules", "json")) || { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] };
@@ -258,9 +250,6 @@ function extractFileId(msg, type) {
   return null;
 }
 
-/* ============================================================
-   KV / API
-============================================================ */
 async function kvGetJSON(kv, key) {
   try { return await kv.get(key, { type: "json", cacheTtl: 30 }); }
   catch (e) { console.log(JSON.stringify({ event: "KV_GET_ERROR", key: key, err: e.message })); throw e; }
@@ -298,9 +287,6 @@ async function bale(env, method, payload) {
   return data.result;
 }
 
-/* ============================================================
-   🔒 کلیدهای KV (پیشوند ثابت)
-============================================================ */
 const QP = "mynote:q:";
 const AP = "mynote:album:";
 const DP = "mynote:dlq:";
@@ -360,9 +346,6 @@ async function checkSource(kv, c, chatId) {
   return true;
 }
 
-/* ============================================================
-   صف
-============================================================ */
 function buildItemFromMessage(msg) {
   const type = detectType(msg);
   const fileId = extractFileId(msg, type);
@@ -431,9 +414,6 @@ async function finalizeAlbums(kv, c) {
   return finalized;
 }
 
-/* ============================================================
-   📤 ارسال
-============================================================ */
 async function makeCaption(env, kv, item) {
   const c = cfg(env);
   let caption = item.caption || "";
@@ -495,9 +475,6 @@ async function deleteSourceMessage(env, item) {
   }
 }
 
-/* ============================================================
-   🎯 مدیر هشتگ داخل بات
-============================================================ */
 async function getState(kv, chatId) {
   try { return await kv.get(TAG_STATE_PREFIX + chatId, "json"); }
   catch (e) { return null; }
@@ -673,9 +650,6 @@ async function handleTagAdmin(env, kv, c, msg) {
   return false;
 }
 
-/* ============================================================
-   WEBHOOK
-============================================================ */
 async function onWebhook(request, env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
@@ -743,9 +717,6 @@ async function onWebhook(request, env) {
   return new Response(JSON.stringify(resp), { headers: { "Content-Type": "application/json" } });
 }
 
-/* ============================================================
-   PROCESS + RETRY + DLQ
-============================================================ */
 function backoffSeconds(attempt, retryAfter) {
   if (retryAfter > 0) return Math.max(60, retryAfter);
   const delays = [60, 120, 240, 480, 900];
@@ -796,9 +767,6 @@ async function processOne(env, kv, c) {
   }
 }
 
-/* ============================================================
-   CRON
-============================================================ */
 async function onCron(env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
@@ -858,9 +826,6 @@ async function onCron(env) {
   }
 }
 
-/* ============================================================
-   ADMIN HTTP
-============================================================ */
 function isAdmin(req, env) {
   const key = env.ADMIN_KEY;
   if (!key) return false;
@@ -929,8 +894,9 @@ export default {
     }
     if (p === "/admin/add-forbidden") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      const url = new URL(request.url);
       const body = await request.json().catch(function () { return null; });
-      const phrase = body ? body.phrase : null;
+      const phrase = (body && body.phrase) || url.searchParams.get("phrase");
       if (!phrase) return json({ ok: false, error: "phrase required" }, 400);
       const rules = await loadCleaningRules(KV);
       if (!rules.forbidden_phrases.includes(phrase)) rules.forbidden_phrases.push(phrase);
@@ -939,16 +905,19 @@ export default {
     }
     if (p === "/admin/remove-forbidden") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      const url = new URL(request.url);
       const body = await request.json().catch(function () { return null; });
+      const phrase = (body && body.phrase) || url.searchParams.get("phrase");
       const rules = await loadCleaningRules(KV);
-      rules.forbidden_phrases = (rules.forbidden_phrases || []).filter(function (x) { return x !== (body ? body.phrase : null); });
+      rules.forbidden_phrases = (rules.forbidden_phrases || []).filter(function (x) { return x !== phrase; });
       await kvPutJSON(KV, "mynote:cleaning_rules", rules, 2592000);
       return json({ ok: true, rules: rules });
     }
     if (p === "/admin/add-emoji") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      const url = new URL(request.url);
       const body = await request.json().catch(function () { return null; });
-      const emoji = body ? body.emoji : null;
+      const emoji = (body && body.emoji) || url.searchParams.get("emoji");
       if (!emoji) return json({ ok: false, error: "emoji required" }, 400);
       const rules = await loadCleaningRules(KV);
       if (!rules.remove_emojis.includes(emoji)) rules.remove_emojis.push(emoji);
@@ -957,8 +926,9 @@ export default {
     }
     if (p === "/admin/add-line") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      const url = new URL(request.url);
       const body = await request.json().catch(function () { return null; });
-      const pattern = body ? body.pattern : null;
+      const pattern = (body && body.pattern) || url.searchParams.get("pattern");
       if (!pattern) return json({ ok: false, error: "pattern required" }, 400);
       const rules = await loadCleaningRules(KV);
       if (!rules.remove_lines.includes(pattern)) rules.remove_lines.push(pattern);
