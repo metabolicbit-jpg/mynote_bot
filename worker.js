@@ -1058,18 +1058,27 @@ export default {
     }
 
     // ===== مهاجرت از v19 به پیشوند ثابت (فقط یک‌بار) =====
+    // ===== مهاجرت از v19 به پیشوند ثابت (batch-wise) =====
     if (p === "/admin/migrate-v19-to-stable") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      
+      const url = new URL(request.url);
+      const batchSize = Math.min(30, Math.max(1, parseInt(url.searchParams.get("batch") || "30")));
+      
       try {
         const oldPrefixes = ["v19:q:", "v19:album:", "v19:dlq:"];
         const newPrefixes = ["mynote:q:", "mynote:album:", "mynote:dlq:"];
         let migrated = 0;
+        let remaining = 0;
         
-        for (let i = 0; i < oldPrefixes.length; i++) {
+        // مهاجرت queue items
+        for (let i = 0; i < oldPrefixes.length && migrated < batchSize; i++) {
           const oldPrefix = oldPrefixes[i];
           const newPrefix = newPrefixes[i];
-          const list = await KV.list({ prefix: oldPrefix, limit: 1000 });
+          const list = await KV.list({ prefix: oldPrefix, limit: batchSize - migrated });
+          
           for (const key of list.keys) {
+            if (migrated >= batchSize) break;
             const value = await KV.get(key.name);
             if (value) {
               const newKey = newPrefix + key.name.replace(oldPrefix, "");
@@ -1079,6 +1088,49 @@ export default {
             }
           }
         }
+        
+        // scheduler (فقط یک بار)
+        const schedOld = await KV.get("v19:sched");
+        if (schedOld && migrated < batchSize) {
+          await KV.put(SCHED_KEY, schedOld);
+          await KV.delete("v19:sched");
+          migrated++;
+        }
+        
+        // lock (فقط یک بار)
+        const lockOld = await KV.get("v19:lock");
+        if (lockOld && migrated < batchSize) {
+          await KV.put(LOCK_KEY, lockOld);
+          await KV.delete("v19:lock");
+          migrated++;
+        }
+        
+        // hashes (فقط یک بار)
+        const hashesOld = await KV.get("v19:hashes");
+        if (hashesOld && migrated < batchSize) {
+          await KV.put(HASH_KEY, hashesOld);
+          await KV.delete("v19:hashes");
+          migrated++;
+        }
+        
+        // شمارش باقیمانده
+        for (const prefix of oldPrefixes) {
+          const list = await KV.list({ prefix, limit: 1000 });
+          remaining += list.keys.length;
+        }
+        
+        return json({ 
+          ok: true, 
+          migrated, 
+          remaining,
+          message: remaining > 0 
+            ? `مهاجرت شد: ${migrated}. باقیمانده: ${remaining}. دوباره اجرا کن.`
+            : `✅ همه ${migrated} آیتم مهاجرت شدند!`
+        });
+      } catch (e) {
+        return json({ ok: false, error: e.message }, 500);
+      }
+    }
         
         // scheduler
         const schedOld = await KV.get("v19:sched");
