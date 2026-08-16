@@ -1,15 +1,15 @@
 /* ============================================================
-   mynote_bot — V19.1 TAG-MENU + WEBHOOK-MGMT
-   - V18 + سیستم مدیریت هشتگ داخل خود بات
-   - منوی تو در تو (Home → 🏷️ → زیرمنو)
-   - بانک هشتگ در KV (معمولی + JSON خودکار)
-   - نرمال‌سازی (کشیده/ی ک عربی)
-   - دکمه 🔍 تست هشتگ
-   - دکمه ❌ لغو = برگشت به خانه
-   - تشخیص کلمات جدید vs به‌روزرسانی
-   - مدیریت وب‌هوک از داخل بات
+   mynote_bot — V20 STABLE
+   - پیشوند ثابت KV (mynote:) → حفظ state بین دیپلوی‌ها
+   - تمیزکاری ایموجی با regex دارای پرچم u (بدون خردهٔ )
+   - نرمال‌سازی فارسی + ضدتکرار قوی‌تر
+   - endpoint مهاجرت از v19 → mynote
+   - بانک هشتگ در KV + منوی تو در تو
+   - پنجرهٔ ارسال ۸:۳۰-۲۲:۳۰ تهران
+   - فاصلهٔ تصادفی ۳-۱۰ دقیقه
+   - آلبوم، Retry+Backoff، DLQ، Lock
 ============================================================ */
-const VERSION = "V19.1-TAG-MENU-2026-08-14";
+const VERSION = "V20-STABLE-2026-08-16";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 
 const DEFAULTS = {
@@ -18,7 +18,7 @@ const DEFAULTS = {
   ALBUM_QUIET_SEC: 20, ALBUM_TTL_SEC: 900,
   REPORT_INTERVAL_SEC: 3600, LOCK_TTL_SEC: 120,
   SEEN_TTL_SEC: 604800, DLQ_TTL_SEC: 2592000,
-  MAX_RETRIES: 5, HASH_HISTORY: 500
+  MAX_RETRIES: 5, HASH_HISTORY: 2000
 };
 
 const HASHTAG_BANK_KEY = "mynote:hashtag_bank";
@@ -46,7 +46,7 @@ const DEFAULT_BANK = {
 };
 
 /* ============================================================
-   🗂️ منوها — قابل توسعه با اضافه کردن یک entry
+   🗂️ منوها
 ============================================================ */
 const T_HASHTAG = "🏷️ هشتگ";
 const T_ADD = "➕ افزودن کلمه";
@@ -121,7 +121,7 @@ function normalizeText(t) {
 }
 
 /* ============================================================
-   🧹 تمیزکاری پایه (داخل کد)
+   🧹 تمیزکاری پایه (با regex دارای پرچم u برای پاکسازی کامل ایموجی)
 ============================================================ */
 function cleanText(text, entities) {
   if (!text) return "";
@@ -137,17 +137,33 @@ function cleanText(text, entities) {
   }
   const lines = t.split("\n").map(line => {
     let l = line;
+    // نرمال‌سازی کشیده
     l = l.replace(/\u0640+/g, "");
+    // لینک‌های markdown و URL
     l = l.replace(/\[[^\]]*\]\([^)]*\)?/g, "");
     l = l.replace(/https?:\/\/[^\s]+/g, "");
     l = l.replace(/ble\.ir\/[^\s]*/g, "");
     l = l.replace(/t\.me\/[^\s]*/g, "");
-    l = l.replace(/[Ⓜ🅰🅱🆎🅾]/g, "");
+    // ایموجی‌های برندینگ — با پرچم u (جفت سورُوگیت کامل پاک می‌شه)
+    l = l.replace(/[Ⓜ🅱🅾]/gu, "");
+    // منشن و هشتگ
     l = l.replace(/@[a-zA-Z0-9_]+/g, "");
     l = l.replace(/#[^\s]+/g, "");
+    // ستاره و بولت‌ها — با پرچم u
     l = l.replace(/[\*]+/g, "");
-    l = l.replace(/[➖➕🔻🔸▫️▪️◽◾•●○✓✗]/g, "");
+    l = l.replace(/[➖➕🔸▫️▪️◽◾•●○✓✗]/gu, "");
+    // ==== جاروی نهایی خرده‌های شکسته ====
+    // ۱) کاراکتر جایگزینی 
+    l = l.replace(/\uFFFD/g, "");
+    // ۲) سورُوگیت بالا بدون جفت
+    l = l.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "");
+    // ۳) سورُوگیت پایین بدون جفت
+    l = l.replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+    // ۴) ZWJ / ZWSP / Variation Selector یتیم
+    l = l.replace(/[\u200B\u200D\uFE0F]/g, "");
     const n = l.trim();
+    // خط خالی یا فقط شامل نامرئی‌ها (نیم‌فاصله و...) → حذف
+    if (!n || /^[\s\u200C]*$/.test(n)) return "";
     if (/دانستنی\s*های\s*جالب/.test(n)) return "";
     if (/پیشنهاد مجله/.test(n)) return "";
     if (/حتما.{0,25}کارت.{0,25}میاد/.test(n)) return "";
@@ -249,7 +265,7 @@ async function applyCustomRules(kv, text) {
 }
 
 function contentHash(text, fileId) {
-  const content = (text || "").slice(0, 100) + (fileId || "");
+  const content = normalizeText(text || "").slice(0, 150) + "|" + (fileId || "");
   let h = 0;
   for (let i = 0; i < content.length; i++) { h = ((h << 5) - h) + content.charCodeAt(i); h |= 0; }
   return Math.abs(h).toString(36);
@@ -321,12 +337,15 @@ async function bale(env, method, payload) {
 }
 
 /* ============================================================
-   کلیدهای KV
+   🔒 کلیدهای KV (پیشوند ثابت برای حفظ state بین دیپلوی‌ها)
 ============================================================ */
-const QP = "v19:q:";
-const AP = "v19:album:";
-const DP = "v19:dlq:";
-const HASH_KEY = "v19:hashes";
+const QP = "mynote:q:";
+const AP = "mynote:album:";
+const DP = "mynote:dlq:";
+const HASH_KEY = "mynote:hashes";
+const SCHED_KEY = "mynote:sched";
+const LOCK_KEY = "mynote:lock";
+const SEEN_PREFIX = "mynote:seen:";
 
 async function listPrefix(kv, prefix, limit = 1000) {
   const r = await kv.list({ prefix, limit });
@@ -349,27 +368,27 @@ async function checkAndAddHash(kv, c, hash) {
 }
 
 async function getSched(kv) {
-  return (await kvGetJSON(kv, "v19:sched")) || {
+  return (await kvGetJSON(kv, SCHED_KEY)) || {
     nextSendAt: 0, lastSendAt: 0, lastReportAt: 0,
     sent: 0, failed: 0, retries: 0, received: 0, lastError: null
   };
 }
-async function saveSched(kv, s) { await kvPutJSON(kv, "v19:sched", s, 2592000); }
+async function saveSched(kv, s) { await kvPutJSON(kv, SCHED_KEY, s, 2592000); }
 
 async function acquireLock(kv, c) {
-  const existing = await kv.get("v19:lock");
+  const existing = await kv.get(LOCK_KEY);
   if (existing) return null;
   const token = crypto.randomUUID();
-  await kv.put("v19:lock", token, { expirationTtl: c.lockTtl });
-  return (await kv.get("v19:lock")) === token ? token : null;
+  await kv.put(LOCK_KEY, token, { expirationTtl: c.lockTtl });
+  return (await kv.get(LOCK_KEY)) === token ? token : null;
 }
 async function releaseLock(kv, token) {
-  if (token && (await kv.get("v19:lock")) === token) await kv.delete("v19:lock");
+  if (token && (await kv.get(LOCK_KEY)) === token) await kv.delete(LOCK_KEY);
 }
 
 async function isDup(kv, c, updateId) {
   if (updateId == null) return false;
-  const key = "v19:seen:" + updateId;
+  const key = SEEN_PREFIX + updateId;
   if (await kv.get(key)) return true;
   await kvPutText(kv, key, "1", c.seenTtl);
   return false;
@@ -543,7 +562,6 @@ function parseAddInput(text) {
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
-    // JSON خودکار (آرایه یا شیء)
     if (line.startsWith("[")) {
       try {
         const arr = JSON.parse(line);
@@ -566,7 +584,6 @@ function parseAddInput(text) {
         continue;
       } catch {}
     }
-    // حالت معمولی: "کلمه #tag1 #tag2"
     if (!line.includes("#")) continue;
     const tags = line.match(/#[^\s#]+/g) || [];
     const keyword = normalizeText(line.slice(0, line.indexOf("#")).replace(/[=:：]\s*$/, ""));
@@ -579,7 +596,6 @@ async function handleTagAdmin(env, kv, c, msg) {
   const text = (msg.text || "").trim();
   const chatId = String(msg.chat.id);
 
-  // ---- دکمه‌های منو: اولویت ناوبری ----
   if (text === "/start" || text === "/menu" || text === "/tags") {
     await setState(kv, chatId, null);
     await adminSay(env, chatId, MENUS.home.text, MENUS.home.rows);
@@ -595,24 +611,18 @@ async function handleTagAdmin(env, kv, c, msg) {
     await adminSay(env, chatId, "🏠 برگشتیم به منوی اصلی", MENUS.home.rows);
     return true;
   }
-
-  // ---- ناوبری به زیرمنو (دکمه‌ها) ----
   if (text === T_ADD) {
     await setState(kv, chatId, { mode: "adding" });
     await adminSay(env, chatId,
-      "✏️ هر خط را به این شکل بنویس:\n" +
-      "کلمه #هشتگ1 #هشتگ2\n\n" +
-      "مثال:\n" +
-      "اختاپوس #حیات_وحش #جانوران\n" +
-      "پسته #تغذیه\n" +
-      "هوش مصنوعی #تکنولوژی\n\n" +
+      "✏️ هر خط را به این شکل بنویس:\nکلمه #هشتگ1 #هشتگ2\n\n" +
+      "مثال:\nاختاپوس #حیات_وحش #جانوران\nپسته #تغذیه\n\n" +
       "وقتی تمام شد «❌ لغو» را بزن."
     );
     return true;
   }
   if (text === T_DEL) {
     await setState(kv, chatId, { mode: "deleting" });
-    await adminSay(env, chatId, "🗑️ کلمه‌هایی که می‌خواهی حذف شوند را بفرست (هر خط یکی، یا با ویرگول جدا کن).");
+    await adminSay(env, chatId, "🗑️ کلمه‌هایی که می‌خواهی حذف شوند را بفرست (هر خط یکی، یا با ویرگول).");
     return true;
   }
   if (text === T_LIST) {
@@ -636,11 +646,9 @@ async function handleTagAdmin(env, kv, c, msg) {
     return true;
   }
 
-  // ---- حالت‌ها ----
   const state = await getState(kv, chatId);
   if (!state) return false;
 
-  // ==== حالت افزودن کلمه (با تفکیک جدید vs به‌روزرسانی) ====
   if (state.mode === "adding") {
     const parsed = parseAddInput(text);
     if (!parsed.length) {
@@ -651,17 +659,12 @@ async function handleTagAdmin(env, kv, c, msg) {
     const newWords = [];
     const updatedWords = [];
     for (const p of parsed) {
-      if (bank.keywords[p.keyword]) {
-        updatedWords.push(p);
-      } else {
-        newWords.push(p);
-      }
+      if (bank.keywords[p.keyword]) updatedWords.push(p);
+      else newWords.push(p);
       bank.keywords[p.keyword] = p.tags;
     }
     await saveHashtagBank(kv, bank);
     await setState(kv, chatId, null);
-    
-    // ساخت پیام دقیق‌تر
     let msgText = "";
     if (newWords.length > 0) {
       msgText += `✅ ${newWords.length} کلمه **جدید** اضافه شد:\n`;
@@ -717,10 +720,8 @@ async function handleTagAdmin(env, kv, c, msg) {
       `کلمات مطابقت‌کرده: ${matched.length ? matched.join("، ") : "هیچ"}\n` +
       `هشتگ‌های تولیدی: ${finalTags.join(" ")}`
     );
-    // حالت تست پاک نمی‌شود تا تست‌های بعدی راحت باشند
     return true;
   }
-
   return false;
 }
 
@@ -741,24 +742,28 @@ async function onWebhook(request, env) {
   const msg = body?.channel_post || body?.message;
   if (!msg) return new Response(JSON.stringify({ ok: true, ignored: true }), { headers: { "Content-Type": "application/json" } });
 
-  // ===== لاگ دیباگ برای پیام‌های ادمین =====
   const chatId = String(msg.chat?.id || "");
   const chatType = String(msg.chat?.type || "");
   if (chatId === c.admin) {
     console.log(JSON.stringify({
-      event: "ADMIN_MESSAGE",
-      chatId, chatType,
-      text: (msg.text || "").substring(0, 50),
-      isAdmin: chatId === c.admin
+      event: "ADMIN_MESSAGE", chatId, chatType,
+      text: (msg.text || "").substring(0, 50)
     }));
   }
 
-  // ===== مدیر هشتگ: چت خصوصی ادمین (بدون چک سخت‌گیرانه chat.type) =====
+  // ===== امنیت وب‌هوک: توکن مخفی =====
+  const configuredSecret = env.BALE_WEBHOOK_SECRET;
+  if (configuredSecret) {
+    const received = request.headers.get("X-Bale-Bot-Api-Secret-Token") || request.headers.get("X-Telegram-Bot-Api-Secret-Token");
+    if (received !== configuredSecret) {
+      console.log(JSON.stringify({ event: "WEBHOOK_SECRET_REJECTED" }));
+      return new Response("Unauthorized", { status: 401 });
+    }
+  }
+
+  // مدیر هشتگ: چت خصوصی ادمین
   if (c.admin && chatId === c.admin) {
-    // اگر از کانال مقصد اومده، رد کن (لوپ)
-    if (c.dest && chatId === c.dest) {
-      // نادیده بگیر
-    } else {
+    if (!(c.dest && chatId === c.dest)) {
       const handled = await handleTagAdmin(env, KV, c, msg);
       if (handled) {
         return new Response(JSON.stringify({ ok: true, admin: true }), { headers: { "Content-Type": "application/json" } });
@@ -864,7 +869,7 @@ async function onCron(env) {
     if (c.admin && now - (s.lastReportAt || 0) >= c.reportInt * 1000) {
       const q = await listPrefix(KV, QP, 1000);
       const d = await listPrefix(KV, DP, 100);
-      const txt = `📊 گزارش mynote_bot (V19.1)\n\n🕐 ${iso()}\n⏰ بازه: ${String(Math.floor(c.windowStart / 60)).padStart(2, "0")}:${String(c.windowStart % 60).padStart(2, "0")} تا ${String(Math.floor(c.windowEnd / 60)).padStart(2, "0")}:${String(c.windowEnd % 60).padStart(2, "0")}\n🧹 تمیزکاری: ${c.cleanCaptions ? "روشن" : "خاموش"}\n\n📥 دریافتی: ${s.received}\n📤 ارسال موفق: ${s.sent}\n🔁 Retry: ${s.retries}\n☠️ DLQ: ${d.length}\n❌ Failed: ${s.failed}\n📦 صف: ${q.length}\n⏭ ارسال بعدی: ${s.nextSendAt ? iso(s.nextSendAt) : "—"}\n\n${s.lastError ? "⚠️ خطا: " + s.lastError : "✅ بدون خطا"}`;
+      const txt = `📊 گزارش mynote_bot (V20)\n\n🕐 ${iso()}\n⏰ بازه: ${String(Math.floor(c.windowStart / 60)).padStart(2, "0")}:${String(c.windowStart % 60).padStart(2, "0")} تا ${String(Math.floor(c.windowEnd / 60)).padStart(2, "0")}:${String(c.windowEnd % 60).padStart(2, "0")}\n🧹 تمیزکاری: ${c.cleanCaptions ? "روشن" : "خاموش"}\n\n📥 دریافتی: ${s.received}\n📤 ارسال موفق: ${s.sent}\n🔁 Retry: ${s.retries}\n☠️ DLQ: ${d.length}\n❌ Failed: ${s.failed}\n📦 صف: ${q.length}\n⏭ ارسال بعدی: ${s.nextSendAt ? iso(s.nextSendAt) : "—"}\n\n${s.lastError ? "⚠️ خطا: " + s.lastError : "✅ بدون خطا"}`;
       try {
         await bale(env, "sendMessage", { chat_id: c.admin, text: txt });
         s.lastReportAt = now;
@@ -1029,7 +1034,8 @@ export default {
           body: JSON.stringify({
             url: webhookUrl,
             allowed_updates: ["message", "channel_post", "edited_channel_post"],
-            drop_pending_updates: false
+            drop_pending_updates: false,
+            ...(env.BALE_WEBHOOK_SECRET ? { secret_token: env.BALE_WEBHOOK_SECRET } : {})
           })
         });
         const data = await res.json();
@@ -1046,6 +1052,64 @@ export default {
         const res = await fetch(BALE_BASE + token + "/getWebhookInfo");
         const data = await res.json();
         return json({ ok: true, info: data });
+      } catch (e) {
+        return json({ ok: false, error: e.message }, 500);
+      }
+    }
+
+    // ===== مهاجرت از v19 به پیشوند ثابت (فقط یک‌بار) =====
+    if (p === "/admin/migrate-v19-to-stable") {
+      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      try {
+        const oldPrefixes = ["v19:q:", "v19:album:", "v19:dlq:"];
+        const newPrefixes = ["mynote:q:", "mynote:album:", "mynote:dlq:"];
+        let migrated = 0;
+        
+        for (let i = 0; i < oldPrefixes.length; i++) {
+          const oldPrefix = oldPrefixes[i];
+          const newPrefix = newPrefixes[i];
+          const list = await KV.list({ prefix: oldPrefix, limit: 1000 });
+          for (const key of list.keys) {
+            const value = await KV.get(key.name);
+            if (value) {
+              const newKey = newPrefix + key.name.replace(oldPrefix, "");
+              await KV.put(newKey, value);
+              await KV.delete(key.name);
+              migrated++;
+            }
+          }
+        }
+        
+        // scheduler
+        const schedOld = await KV.get("v19:sched");
+        if (schedOld) {
+          await KV.put(SCHED_KEY, schedOld);
+          await KV.delete("v19:sched");
+        }
+        // lock
+        const lockOld = await KV.get("v19:lock");
+        if (lockOld) {
+          await KV.put(LOCK_KEY, lockOld);
+          await KV.delete("v19:lock");
+        }
+        // hashes
+        const hashesOld = await KV.get("v19:hashes");
+        if (hashesOld) {
+          await KV.put(HASH_KEY, hashesOld);
+          await KV.delete("v19:hashes");
+        }
+        // seen
+        const seenList = await KV.list({ prefix: "v19:seen:", limit: 1000 });
+        for (const key of seenList.keys) {
+          const value = await KV.get(key.name);
+          if (value) {
+            await KV.put(SEEN_PREFIX + key.name.replace("v19:seen:", ""), value);
+            await KV.delete(key.name);
+            migrated++;
+          }
+        }
+        
+        return json({ ok: true, migrated });
       } catch (e) {
         return json({ ok: false, error: e.message }, 500);
       }
