@@ -132,6 +132,8 @@ function cleanText(text, entities) {
     l = l.replace(/[\u200B\u200D\uFE0F]/g, "");
     const n = l.trim();
     if (!n || /^[\s\u200C]*$/.test(n)) return "";
+    // 🎯 خط تزئینی: فقط ایموجی + فاصله، بدون هیچ حرف یا عدد → حذف
+    if (!/[\p{L}\p{N}]/u.test(n) && /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(n)) return "";
     if (/دانستنی\s*های\s*جالب/.test(n)) return "";
     if (/پیشنهاد مجله/.test(n)) return "";
     if (/حتما.{0,25}کارت.{0,25}میاد/.test(n)) return "";
