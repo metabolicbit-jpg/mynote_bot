@@ -1,9 +1,14 @@
 /* ============================================================
-   mynote_bot — V22 OPTIMIZED
-   - بهینه‌سازی برای مصرف کمتر kv.list (پلن رایگان Cloudflare)
-   - شمارنده‌های زنده در scheduler (بدون نیاز به list)
-   - limit کاهش‌یافته برای list ها (50 به جای 1000)
-   - همه قابلیت‌های V20 حفظ شده
+   mynote_bot — V22 OPTIMIZED (بازسازی کامل بدون باگ)
+   - مصرف بهینهٔ KV برای پلن رایگان کلودفلر
+   - شمارنده‌های زنده در scheduler (بدون kv.list در admin/status)
+   - سقف list برابر 50 + مدیریت خطای سهمیه
+   - cron: هر 3 دقیقه (تنظیم در wrangler.toml)
+   - پنجرهٔ ارسال 8:30 تا 22:30 تهران + فاصلهٔ تصادفی 3-10 دقیقه
+   - بانک هشتگ در KV + منوی تو در تو داخل بات
+   - قوانین تمیزکاری سفارشی با لینک
+   - تمیزکاری امن ایموجی + حذف خط‌های تزئینی
+   - آلبوم، Retry+Backoff، DLQ، Lock، گزارش ساعتی
 ============================================================ */
 const VERSION = "V22-OPTIMIZED-2026-08-20";
 const BALE_BASE = "https://tapi.bale.ai/bot";
@@ -76,6 +81,7 @@ function cfg(env) {
     listLimit: Math.max(10, n("LIST_LIMIT", DEFAULTS.LIST_LIMIT))
   };
 }
+
 function iranMinutes() {
   const d = new Date(Date.now() + 3.5 * 3600 * 1000);
   return d.getUTCHours() * 60 + d.getUTCMinutes();
@@ -110,11 +116,11 @@ function cleanText(text, entities) {
     l = l.replace(/https?:\/\/[^\s]+/g, "");
     l = l.replace(/ble\.ir\/[^\s]*/g, "");
     l = l.replace(/t\.me\/[^\s]*/g, "");
-    l = l.replace(/[Ⓜ🅱🅾]/gu, "");
+    l = l.replace(/[Ⓜ🅰🅱🆎🅾]/gu, "");
     l = l.replace(/@[a-zA-Z0-9_]+/g, "");
     l = l.replace(/#[^\s]+/g, "");
     l = l.replace(/[\*]+/g, "");
-    l = l.replace(/[➖➕🔸▫️▪️◽◾•●○✓✗]/gu, "");
+    l = l.replace(/[➖➕🔻🔸▫️▪️◽◾•●○✓✗]/gu, "");
     l = l.replace(/\uFFFD/g, "");
     l = l.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "");
     l = l.replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
@@ -137,8 +143,12 @@ function cleanText(text, entities) {
 async function loadHashtagBank(kv) {
   try {
     const bank = await kv.get(HASHTAG_BANK_KEY, "json");
-    if (bank && bank.keywords) return { branding: bank.branding || DEFAULT_BANK.branding, fallback: bank.fallback || DEFAULT_BANK.fallback, keywords: bank.keywords };
-  } catch (e) { console.log(JSON.stringify({ event: "BANK_LOAD_ERROR", err: e.message })); }
+    if (bank && bank.keywords) {
+      return { branding: bank.branding || DEFAULT_BANK.branding, fallback: bank.fallback || DEFAULT_BANK.fallback, keywords: bank.keywords };
+    }
+  } catch (e) {
+    console.log(JSON.stringify({ event: "BANK_LOAD_ERROR", err: e.message }));
+  }
   return { branding: DEFAULT_BANK.branding, fallback: DEFAULT_BANK.fallback, keywords: Object.assign({}, DEFAULT_BANK.keywords) };
 }
 async function saveHashtagBank(kv, bank) { await kvPutJSON(kv, HASHTAG_BANK_KEY, bank, 2592000); }
@@ -167,17 +177,38 @@ async function buildCaption(kv, rawCaption, entities, destUsername) {
 async function loadCleaningRules(kv) {
   try {
     return (await kv.get("mynote:cleaning_rules", "json")) || { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] };
-  } catch (e) { return { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] }; }
+  } catch (e) {
+    return { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] };
+  }
 }
+
 async function applyCustomRules(kv, text) {
   if (!text) return text;
   const rules = await loadCleaningRules(kv);
   let lines = text.split("\n");
-  for (const phrase of rules.forbidden_phrases || []) { if (!phrase) continue; lines = lines.map(function (l) { return l.split(phrase).join(""); }); }
-  for (const pattern of rules.remove_lines || []) { if (!pattern) continue; lines = lines.filter(function (l) { return !l.includes(pattern); }); }
-  for (const rx of rules.forbidden_regex || []) { if (!rx) continue; try { const re = new RegExp(rx, "gi"); lines = lines.map(function (l) { return l.replace(re, ""); }); } catch (e) { /* ignore */ } }
-  for (const rule of rules.replace_rules || []) { if (!rule || !rule.from) continue; lines = lines.map(function (l) { return l.split(rule.from).join(rule.to || ""); }); }
-  for (const emoji of rules.remove_emojis || []) { if (!emoji) continue; lines = lines.map(function (l) { return l.split(emoji).join(""); }); }
+  for (const phrase of rules.forbidden_phrases || []) {
+    if (!phrase) continue;
+    lines = lines.map(function (l) { return l.split(phrase).join(""); });
+  }
+  for (const pattern of rules.remove_lines || []) {
+    if (!pattern) continue;
+    lines = lines.filter(function (l) { return !l.includes(pattern); });
+  }
+  for (const rx of rules.forbidden_regex || []) {
+    if (!rx) continue;
+    try {
+      const re = new RegExp(rx, "gi");
+      lines = lines.map(function (l) { return l.replace(re, ""); });
+    } catch (e) { /* ignore */ }
+  }
+  for (const rule of rules.replace_rules || []) {
+    if (!rule || !rule.from) continue;
+    lines = lines.map(function (l) { return l.split(rule.from).join(rule.to || ""); });
+  }
+  for (const emoji of rules.remove_emojis || []) {
+    if (!emoji) continue;
+    lines = lines.map(function (l) { return l.split(emoji).join(""); });
+  }
   return lines.map(function (l) { return l.trim(); }).filter(function (x) { return x.length > 0; }).join("\n").trim();
 }
 
@@ -255,9 +286,6 @@ const SCHED_KEY = "mynote:sched";
 const LOCK_KEY = "mynote:lock";
 const SEEN_PREFIX = "mynote:seen:";
 
-/* ============================================================
-   🔢 تابع list با limit کاهش‌یافته و مدیریت خطا
-============================================================ */
 async function listPrefix(kv, prefix, limit, c) {
   const lim = Math.min(limit || c.listLimit, c.listLimit);
   try {
@@ -267,7 +295,7 @@ async function listPrefix(kv, prefix, limit, c) {
       try {
         const v = await kv.get(k.name, { type: "json", cacheTtl: 30 });
         if (v) items.push({ key: k.name, item: v });
-      } catch (e) { /* skip bad items */ }
+      } catch (e) { /* skip */ }
     }
     return items.sort(function (a, b) { return (a.item.createdAt || 0) - (b.item.createdAt || 0); });
   } catch (e) {
@@ -291,15 +319,11 @@ async function checkAndAddHash(kv, c, hash) {
   } catch (e) { return false; }
 }
 
-/* ============================================================
-   📊 Scheduler با شمارنده‌های زنده (بدون نیاز به list)
-============================================================ */
 async function getSched(kv) {
   return (await kvGetJSON(kv, SCHED_KEY)) || {
     nextSendAt: 0, lastSendAt: 0, lastReportAt: 0,
     sent: 0, failed: 0, retries: 0, received: 0,
-    queueCount: 0, dlqCount: 0, albumCount: 0,
-    hashtagCount: 0, lastError: null
+    queueCount: 0, dlqCount: 0, lastError: null
   };
 }
 async function saveSched(kv, s) { await kvPutJSON(kv, SCHED_KEY, s, 2592000); }
@@ -350,7 +374,6 @@ async function enqueueSingle(kv, msg, c, s) {
   }
   const key = QP + item.createdAt + "-" + crypto.randomUUID().slice(0, 8);
   await kvPutJSON(kv, key, item, c.dlqTtl);
-  // 🎯 به‌روزرسانی شمارنده
   s.queueCount = (s.queueCount || 0) + 1;
   return { item: item, key: key };
 }
@@ -471,8 +494,28 @@ function parseAddInput(text) {
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
-    if (line.startsWith("[")) { try { const arr = JSON.parse(line); for (const obj of arr) { if (obj && obj.keyword) { const tags = Array.isArray(obj.tags) ? obj.tags : (obj.tag ? [obj.tag] : []); if (tags.length) out.push({ keyword: normalizeText(obj.keyword), tags: tags.map(function (t) { return String(t).startsWith("#") ? t : "#" + t; }) }); } } continue; } catch (e) { /* fallthrough */ } }
-    if (line.startsWith("{")) { try { const obj = JSON.parse(line); if (obj && obj.keyword) { const tags = Array.isArray(obj.tags) ? obj.tags : (obj.tag ? [obj.tag] : []); if (tags.length) out.push({ keyword: normalizeText(obj.keyword), tags: tags.map(function (t) { return String(t).startsWith("#") ? t : "#" + t; }) }); } } continue; } catch (e) { /* fallthrough */ } }
+    if (line.startsWith("[")) {
+      try {
+        const arr = JSON.parse(line);
+        for (const obj of arr) {
+          if (obj && obj.keyword) {
+            const tags = Array.isArray(obj.tags) ? obj.tags : (obj.tag ? [obj.tag] : []);
+            if (tags.length) out.push({ keyword: normalizeText(obj.keyword), tags: tags.map(function (t) { return String(t).startsWith("#") ? t : "#" + t; }) });
+          }
+        }
+        continue;
+      } catch (e) { /* ignore */ }
+    }
+    if (line.startsWith("{")) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj && obj.keyword) {
+          const tags = Array.isArray(obj.tags) ? obj.tags : (obj.tag ? [obj.tag] : []);
+          if (tags.length) out.push({ keyword: normalizeText(obj.keyword), tags: tags.map(function (t) { return String(t).startsWith("#") ? t : "#" + t; }) });
+        }
+        continue;
+      } catch (e) { /* ignore */ }
+    }
     if (!line.includes("#")) continue;
     const tags = line.match(/#[^\s#]+/g) || [];
     const keyword = normalizeText(line.slice(0, line.indexOf("#")).replace(/[=:：]\s*$/, ""));
@@ -514,13 +557,21 @@ async function handleTagAdmin(env, kv, c, msg) {
     const parsed = parseAddInput(text);
     if (!parsed.length) { await adminSay(env, chatId, "⚠️ چیزی نفهمیدم!"); return true; }
     const bank = await loadHashtagBank(kv);
-    const newWords = []; const updatedWords = [];
-    for (const p of parsed) { if (bank.keywords[p.keyword]) updatedWords.push(p); else newWords.push(p); bank.keywords[p.keyword] = p.tags; }
+    const newWords = [];
+    const updatedWords = [];
+    for (const p of parsed) {
+      if (bank.keywords[p.keyword]) updatedWords.push(p); else newWords.push(p);
+      bank.keywords[p.keyword] = p.tags;
+    }
     await saveHashtagBank(kv, bank);
     await setState(kv, chatId, null);
     let msgText = "";
-    if (newWords.length > 0) { msgText += "✅ " + newWords.length + " کلمه **جدید**:\n" + newWords.slice(0, 3).map(function (p) { return "• " + p.keyword + " → " + p.tags.join(" "); }).join("\n") + "\n\n"; }
-    if (updatedWords.length > 0) { msgText += "🔄 " + updatedWords.length + " کلمه **به‌روزرسانی**:\n" + updatedWords.slice(0, 3).map(function (p) { return "• " + p.keyword + " → " + p.tags.join(" "); }).join("\n") + "\n\n"; }
+    if (newWords.length > 0) {
+      msgText += "✅ " + newWords.length + " کلمه **جدید**:\n" + newWords.slice(0, 3).map(function (p) { return "• " + p.keyword + " → " + p.tags.join(" "); }).join("\n") + "\n\n";
+    }
+    if (updatedWords.length > 0) {
+      msgText += "🔄 " + updatedWords.length + " کلمه **به‌روزرسانی**:\n" + updatedWords.slice(0, 3).map(function (p) { return "• " + p.keyword + " → " + p.tags.join(" "); }).join("\n") + "\n\n";
+    }
     msgText += "از پست بعدی استفاده می‌شه 🎯";
     await adminSay(env, chatId, msgText, MENUS.hashtag.rows);
     return true;
@@ -529,8 +580,11 @@ async function handleTagAdmin(env, kv, c, msg) {
   if (state.mode === "deleting") {
     const words = text.split(/[\n,،]+/).map(function (s) { return normalizeText(s); }).filter(Boolean);
     const bank = await loadHashtagBank(kv);
-    let n = 0; const found = [];
-    for (const w of words) { if (bank.keywords[w]) { delete bank.keywords[w]; n++; found.push(w); } }
+    let n = 0;
+    const found = [];
+    for (const w of words) {
+      if (bank.keywords[w]) { delete bank.keywords[w]; n++; found.push(w); }
+    }
     await saveHashtagBank(kv, bank);
     await setState(kv, chatId, null);
     await adminSay(env, chatId, n ? ("🗑️ " + n + " کلمه حذف شد:\n" + found.join("، ")) : "⚠️ هیچ‌کدام پیدا نشد.", MENUS.hashtag.rows);
@@ -545,7 +599,10 @@ async function handleTagAdmin(env, kv, c, msg) {
     const matched = [];
     for (const entry of Object.entries(bank.keywords)) {
       const nk = normalizeText(entry[0]);
-      if (nk && normalized.includes(nk)) { matched.push(entry[0]); (Array.isArray(entry[1]) ? entry[1] : [entry[1]]).forEach(function (t) { selected.add(t); }); }
+      if (nk && normalized.includes(nk)) {
+        matched.push(entry[0]);
+        (Array.isArray(entry[1]) ? entry[1] : [entry[1]]).forEach(function (t) { selected.add(t); });
+      }
     }
     if (selected.size === 1) selected.add(bank.fallback);
     const finalTags = Array.from(selected).slice(0, 3);
@@ -558,6 +615,7 @@ async function handleTagAdmin(env, kv, c, msg) {
 async function onWebhook(request, env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
+
   const configuredSecret = env.BALE_WEBHOOK_SECRET;
   if (configuredSecret) {
     const received = request.headers.get("X-Bale-Bot-Api-Secret-Token") || request.headers.get("X-Telegram-Bot-Api-Secret-Token");
@@ -585,8 +643,13 @@ async function onWebhook(request, env) {
     }
   }
 
-  if (c.dest && chatId === c.dest) return new Response(JSON.stringify({ ok: true, ignored: true, reason: "dest_echo" }), { headers: { "Content-Type": "application/json" } });
-  if (!(await checkSource(KV, c, chatId))) { console.log(JSON.stringify({ event: "SOURCE_REJECTED", chatId: chatId })); return new Response(JSON.stringify({ ok: true, ignored: true, reason: "source" }), { headers: { "Content-Type": "application/json" } }); }
+  if (c.dest && chatId === c.dest) {
+    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "dest_echo" }), { headers: { "Content-Type": "application/json" } });
+  }
+  if (!(await checkSource(KV, c, chatId))) {
+    console.log(JSON.stringify({ event: "SOURCE_REJECTED", chatId: chatId }));
+    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "source" }), { headers: { "Content-Type": "application/json" } });
+  }
 
   const s = await getSched(KV);
   s.received += 1;
@@ -595,10 +658,15 @@ async function onWebhook(request, env) {
   if (msg.media_group_id) {
     await addToAlbum(KV, msg, c);
     resp = { ok: true, queued: "album_collecting" };
+    console.log(JSON.stringify({ event: "ALBUM_RECEIVED", mid: msg.message_id }));
   } else {
     const result = await enqueueSingle(KV, msg, c, s);
-    if (result.duplicated) resp = { ok: true, ignored: true, reason: "duplicate" };
-    else { resp = { ok: true, queued: result.item.type }; console.log(JSON.stringify({ event: "MESSAGE_QUEUED", type: result.item.type, mid: msg.message_id })); }
+    if (result.duplicated) {
+      resp = { ok: true, ignored: true, reason: "duplicate" };
+    } else {
+      resp = { ok: true, queued: result.item.type };
+      console.log(JSON.stringify({ event: "MESSAGE_QUEUED", type: result.item.type, mid: msg.message_id }));
+    }
   }
   await saveSched(KV, s);
   return new Response(JSON.stringify(resp), { headers: { "Content-Type": "application/json" } });
@@ -644,11 +712,13 @@ async function processOne(env, kv, c, s) {
       await kv.delete(key);
       s.queueCount = Math.max(0, (s.queueCount || 0) - 1);
       s.dlqCount = (s.dlqCount || 0) + 1;
+      console.log(JSON.stringify({ event: "MOVED_TO_DLQ", id: item.id, err: item.lastError }));
       return { status: "dlq", error: item.lastError };
     }
     item.state = "retry";
     item.retryAt = now + backoffSeconds(item.attempts, e.retryAfter || 0) * 1000;
     await kvPutJSON(kv, key, item, c.dlqTtl);
+    console.log(JSON.stringify({ event: "RETRY_SCHEDULED", id: item.id, attempt: item.attempts }));
     return { status: "retry", error: item.lastError };
   }
 }
@@ -668,8 +738,7 @@ async function onCron(env) {
 
     if (c.admin && now - (s.lastReportAt || 0) >= c.reportInt * 1000) {
       const bank = await loadHashtagBank(KV);
-      s.hashtagCount = Object.keys(bank.keywords).length;
-      const txt = "📊 گزارش mynote_bot (V22)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n🧹 تمیزکاری: " + (c.cleanCaptions ? "روشن" : "خاموش") + "\n\n📥 دریافتی: " + s.received + "\n📤 ارسال موفق: " + s.sent + "\n🔁 Retry: " + s.retries + "\n☠️ DLQ: " + (s.dlqCount || 0) + "\n❌ Failed: " + s.failed + "\n📦 صف: " + (s.queueCount || 0) + "\n🏷️ هشتگ‌ها: " + s.hashtagCount + "\n⏭ ارسال بعدی: " + (s.nextSendAt ? iso(s.nextSendAt) : "—") + "\n\n" + (s.lastError ? "⚠️ خطا: " + s.lastError : "✅ بدون خطا");
+      const txt = "📊 گزارش mynote_bot (V22)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n🧹 تمیزکاری: " + (c.cleanCaptions ? "روشن" : "خاموش") + "\n\n📥 دریافتی: " + s.received + "\n📤 ارسال موفق: " + s.sent + "\n🔁 Retry: " + s.retries + "\n☠️ DLQ: " + (s.dlqCount || 0) + "\n❌ Failed: " + s.failed + "\n📦 صف: " + (s.queueCount || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (s.nextSendAt ? iso(s.nextSendAt) : "—") + "\n\n" + (s.lastError ? "⚠️ خطا: " + s.lastError : "✅ بدون خطا");
       try {
         await bale(env, "sendMessage", { chat_id: c.admin, text: txt });
         s.lastReportAt = now;
@@ -683,6 +752,7 @@ async function onCron(env) {
       const delay = Math.floor(c.minDelay + Math.random() * (c.maxDelay - c.minDelay + 1));
       s.nextSendAt = now + delay * 1000;
       await saveSched(KV, s);
+      console.log(JSON.stringify({ event: "NEXT_SEND_SCHEDULED", delay: delay }));
       return;
     }
     if (now < s.nextSendAt) { await saveSched(KV, s); return; }
@@ -731,9 +801,6 @@ export default {
     }
     if (p === "/health") return json({ ok: true, version: VERSION });
 
-    /* ============================================================
-       🎯 admin/status: بدون kv.list! فقط scheduler را می‌خواند
-    ============================================================ */
     if (p === "/admin/status") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       const c = cfg(env);
@@ -778,7 +845,10 @@ export default {
       return json({ ok: true, requeued: count });
     }
 
-    if (p === "/admin/cleaning-rules") { if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 }); return json({ ok: true, rules: await loadCleaningRules(KV) }); }
+    if (p === "/admin/cleaning-rules") {
+      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      return json({ ok: true, rules: await loadCleaningRules(KV) });
+    }
     if (p === "/admin/add-forbidden") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       const url = new URL(request.url);
