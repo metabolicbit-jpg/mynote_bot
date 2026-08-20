@@ -1,19 +1,14 @@
 /* ============================================================
-   mynote_bot — V21 DEDUP (ضدتکرار قوی)
-   - ۳ لایه ضدتکرار برای جلوگیری کامل از ارسال تکراری
-   - لایه ۱: seen_msg (chatId + messageId) - هر پست فقط یک بار
-   - لایه ۲: hash (محتوا) - ۲۰۰۰ تای آخر
-   - لایه ۳: نادیده گرفتن edited_channel_post
-   - پیشوند ثابت KV (mynote:) → حفظ state بین دیپلوی‌ها
-   - تمیزکاری امن ایموجی (regex با پرچم u)
-   - حذف هوشمند خط‌های تزئینی ایموجی
-   - قوانین تمیزکاری سفارشی در KV
-   - پشتیبانی از URL parameter برای endpoint های ادمین
+   mynote_bot — V20 STABLE (بازگشت به نسخه پایدار)
+   - پیشوند ثابت KV (mynote:)
+   - تمیزکاری امن ایموجی
+   - بانک هشتگ در KV + منوی داخل بات
+   - قوانین تمیزکاری سفارشی
+   - پشتیبانی از URL parameter
    - توکن مخفی وب‌هوک (اختیاری)
    - پنجرهٔ ۸:۳۰–۲۲:۳۰ + فاصلهٔ تصادفی ۳–۱۰ دقیقه
-   - آلبوم، Retry+Backoff، DLQ، Lock، گزارش ساعتی
 ============================================================ */
-const VERSION = "V21-DEDUP-2026-08-17";
+const VERSION = "V20-STABLE-ROLLBACK-2026-08-20";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 
 const DEFAULTS = {
@@ -22,7 +17,6 @@ const DEFAULTS = {
   ALBUM_QUIET_SEC: 20, ALBUM_TTL_SEC: 900,
   REPORT_INTERVAL_SEC: 3600, LOCK_TTL_SEC: 120,
   SEEN_TTL_SEC: 604800, DLQ_TTL_SEC: 2592000,
-  MSG_SEEN_TTL_SEC: 2592000, // 30 روز
   MAX_RETRIES: 5, HASH_HISTORY: 2000
 };
 
@@ -81,21 +75,23 @@ function cfg(env) {
     reportInt: Math.max(3600, n("REPORT_INTERVAL_SEC", DEFAULTS.REPORT_INTERVAL_SEC)),
     lockTtl: Math.max(60, n("LOCK_TTL_SEC", DEFAULTS.LOCK_TTL_SEC)),
     seenTtl: Math.max(60, n("SEEN_TTL_SEC", DEFAULTS.SEEN_TTL_SEC)),
-    msgSeenTtl: Math.max(3600, n("MSG_SEEN_TTL_SEC", DEFAULTS.MSG_SEEN_TTL_SEC)),
     dlqTtl: Math.max(60, n("DLQ_TTL_SEC", DEFAULTS.DLQ_TTL_SEC)),
     maxRetries: Math.max(1, n("MAX_RETRIES", DEFAULTS.MAX_RETRIES)),
     hashHistory: Math.max(100, n("HASH_HISTORY", DEFAULTS.HASH_HISTORY))
   };
 }
+
 function iranMinutes() {
   const d = new Date(Date.now() + 3.5 * 3600 * 1000);
   return d.getUTCHours() * 60 + d.getUTCMinutes();
 }
+
 function inWindow(c) {
   if (!c.windowOn) return true;
   const m = iranMinutes();
   return m >= c.windowStart && m <= c.windowEnd;
 }
+
 function iso(ms) { return new Date(ms || Date.now()).toISOString(); }
 
 function normalizeText(t) {
@@ -165,9 +161,11 @@ async function loadHashtagBank(kv) {
   }
   return { branding: DEFAULT_BANK.branding, fallback: DEFAULT_BANK.fallback, keywords: Object.assign({}, DEFAULT_BANK.keywords) };
 }
+
 async function saveHashtagBank(kv, bank) {
   await kvPutJSON(kv, HASHTAG_BANK_KEY, bank, 2592000);
 }
+
 async function getSmartTags(kv, text) {
   const bank = await loadHashtagBank(kv);
   const selected = new Set();
@@ -183,6 +181,7 @@ async function getSmartTags(kv, text) {
   if (selected.size === 1) selected.add(bank.fallback);
   return Array.from(selected).slice(0, 3).join(" ");
 }
+
 async function buildCaption(kv, rawCaption, entities, destUsername) {
   const clean = cleanText(rawCaption || "", entities);
   if (!clean) return null;
@@ -197,6 +196,7 @@ async function loadCleaningRules(kv) {
     return { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] };
   }
 }
+
 async function applyCustomRules(kv, text) {
   if (!text) return text;
   const rules = await loadCleaningRules(kv);
@@ -227,9 +227,8 @@ async function applyCustomRules(kv, text) {
   return lines.map(function (l) { return l.trim(); }).filter(function (x) { return x.length > 0; }).join("\n").trim();
 }
 
-function contentHash(text, fileId, chatId, messageId) {
-  const norm = normalizeText(text || "").slice(0, 200);
-  const content = (chatId || "") + "|" + (messageId || "") + "|" + norm + "|" + (fileId || "");
+function contentHash(text, fileId) {
+  const content = normalizeText(text || "").slice(0, 150) + "|" + (fileId || "");
   let h = 0;
   for (let i = 0; i < content.length; i++) { h = ((h << 5) - h) + content.charCodeAt(i); h |= 0; }
   return Math.abs(h).toString(36);
@@ -246,6 +245,7 @@ function detectType(msg) {
   if (msg.text) return "text";
   return "unknown";
 }
+
 function extractFileId(msg, type) {
   if (type === "photo") return msg.photo[msg.photo.length - 1].file_id;
   if (type === "video") return msg.video.file_id;
@@ -261,18 +261,21 @@ async function kvGetJSON(kv, key) {
   try { return await kv.get(key, { type: "json", cacheTtl: 30 }); }
   catch (e) { console.log(JSON.stringify({ event: "KV_GET_ERROR", key: key, err: e.message })); throw e; }
 }
+
 async function kvPutJSON(kv, key, value, ttl) {
   try {
     const opts = ttl ? { expirationTtl: Math.max(60, Math.floor(ttl)) } : {};
     await kv.put(key, JSON.stringify(value), opts);
   } catch (e) { console.log(JSON.stringify({ event: "KV_PUT_ERROR", key: key, err: e.message })); throw e; }
 }
+
 async function kvPutText(kv, key, value, ttl) {
   try {
     const opts = ttl ? { expirationTtl: Math.max(60, Math.floor(ttl)) } : {};
     await kv.put(key, String(value), opts);
   } catch (e) { console.log(JSON.stringify({ event: "KV_PUT_TEXT_ERROR", key: key, err: e.message })); throw e; }
 }
+
 async function kvDeleteSafe(kv, key) {
   try { await kv.delete(key); } catch (e) { /* ignore */ }
 }
@@ -301,7 +304,6 @@ const HASH_KEY = "mynote:hashes";
 const SCHED_KEY = "mynote:sched";
 const LOCK_KEY = "mynote:lock";
 const SEEN_PREFIX = "mynote:seen:";
-const MSG_SEEN_PREFIX = "mynote:seen_msg:";
 
 async function listPrefix(kv, prefix, limit) {
   const r = await kv.list({ prefix: prefix, limit: limit || 1000 });
@@ -323,23 +325,10 @@ async function checkAndAddHash(kv, c, hash) {
   return false;
 }
 
-/* ============================================================
-   🔒 لایه ۱ ضدتکرار: seen_msg
-   هر پست (بر اساس chatId + messageId) فقط یک بار وارد صف می‌شود
-   با TTL 30 روز
-============================================================ */
-async function isMessageSeen(kv, chatId, messageId) {
-  const key = MSG_SEEN_PREFIX + chatId + ":" + messageId;
-  return !!(await kv.get(key));
-}
-async function markMessageSeen(kv, chatId, messageId, ttl) {
-  const key = MSG_SEEN_PREFIX + chatId + ":" + messageId;
-  await kvPutText(kv, key, "1", ttl);
+async function getSched(kv) {
+  return (await kvGetJSON(kv, SCHED_KEY)) || { nextSendAt: 0, lastSendAt: 0, lastReportAt: 0, sent: 0, failed: 0, retries: 0, received: 0, lastError: null };
 }
 
-async function getSched(kv) {
-  return (await kvGetJSON(kv, SCHED_KEY)) || { nextSendAt: 0, lastSendAt: 0, lastReportAt: 0, sent: 0, failed: 0, retries: 0, received: 0, deduped: 0, lastError: null };
-}
 async function saveSched(kv, s) { await kvPutJSON(kv, SCHED_KEY, s, 2592000); }
 
 async function acquireLock(kv, c) {
@@ -349,6 +338,7 @@ async function acquireLock(kv, c) {
   await kv.put(LOCK_KEY, token, { expirationTtl: c.lockTtl });
   return (await kv.get(LOCK_KEY)) === token ? token : null;
 }
+
 async function releaseLock(kv, token) {
   if (token && (await kv.get(LOCK_KEY)) === token) await kv.delete(LOCK_KEY);
 }
@@ -381,53 +371,29 @@ function buildItemFromMessage(msg) {
     fileId: fileId,
     caption: caption,
     entities: entities,
-    hash: contentHash(caption, fileId, msg.chat.id, msg.message_id),
+    hash: contentHash(caption, fileId),
     createdAt: Date.now(),
     attempts: 0, state: "pending", retryAt: 0
   };
 }
 
 async function enqueueSingle(kv, msg, c) {
-  const chatId = String(msg.chat.id);
-  const messageId = msg.message_id;
-
-  // 🔒 لایه ۱ ضدتکرار: اگر این پست قبلاً دیده شده، رد کن
-  if (await isMessageSeen(kv, chatId, messageId)) {
-    console.log(JSON.stringify({ event: "DUPLICATE_MSG_ID", chatId: chatId, mid: messageId }));
-    return { duplicated: true, reason: "seen_msg" };
-  }
-
   const item = buildItemFromMessage(msg);
-
-  // 🔒 لایه ۲ ضدتکرار: hash محتوا
   if (await checkAndAddHash(kv, c, item.hash)) {
     console.log(JSON.stringify({ event: "DUPLICATE_CONTENT", hash: item.hash }));
-    return { duplicated: true, reason: "hash" };
+    return { duplicated: true };
   }
-
-  // علامت‌گذاری پست به‌عنوان دیده‌شده (۳۰ روز)
-  await markMessageSeen(kv, chatId, messageId, c.msgSeenTtl);
-
   const key = QP + item.createdAt + "-" + crypto.randomUUID().slice(0, 8);
   await kvPutJSON(kv, key, item, c.dlqTtl);
   return { item: item, key: key };
 }
 
 async function addToAlbum(kv, msg, c) {
-  const chatId = String(msg.chat.id);
-  const messageId = msg.message_id;
-
-  // 🔒 لایه ۱: چک کنیم این پیام قبلاً دیده نشده
-  if (await isMessageSeen(kv, chatId, messageId)) {
-    console.log(JSON.stringify({ event: "ALBUM_DUPLICATE_MSG", mid: messageId }));
-    return null;
-  }
-
-  const key = AP + chatId + ":" + msg.media_group_id;
+  const key = AP + msg.chat.id + ":" + msg.media_group_id;
   let album = (await kvGetJSON(kv, key)) || {
-    id: "album-" + chatId + "-" + msg.media_group_id,
+    id: "album-" + msg.chat.id + "-" + msg.media_group_id,
     type: "album",
-    sourceChatId: chatId,
+    sourceChatId: String(msg.chat.id),
     mediaGroupId: String(msg.media_group_id),
     items: [], createdAt: Date.now(), updatedAt: Date.now()
   };
@@ -435,10 +401,6 @@ async function addToAlbum(kv, msg, c) {
   if (!album.items.find(function (x) { return x.sourceMessageId === item.sourceMessageId; })) album.items.push(item);
   album.updatedAt = Date.now();
   await kvPutJSON(kv, key, album, c.albumTtl);
-
-  // علامت‌گذاری پیام
-  await markMessageSeen(kv, chatId, messageId, c.msgSeenTtl);
-
   return album;
 }
 
@@ -529,11 +491,14 @@ async function getState(kv, chatId) {
   try { return await kv.get(TAG_STATE_PREFIX + chatId, "json"); }
   catch (e) { return null; }
 }
+
 async function setState(kv, chatId, state) {
   if (!state) { await kvDeleteSafe(kv, TAG_STATE_PREFIX + chatId); return; }
   await kvPutJSON(kv, TAG_STATE_PREFIX + chatId, state, 3600);
 }
+
 function makeKeyboard(rows) { return { keyboard: rows, resize_keyboard: true }; }
+
 async function adminSay(env, chatId, text, rows) {
   const payload = { chat_id: chatId, text: text };
   if (rows) payload.reply_markup = makeKeyboard(rows);
@@ -721,12 +686,6 @@ async function onWebhook(request, env) {
     return new Response(JSON.stringify({ ok: true, duplicate: true }), { headers: { "Content-Type": "application/json" } });
   }
 
-  // 🚫 نادیده گرفتن کامل edited_channel_post (باعث تکرار می‌شد)
-  if (body && body.edited_channel_post) {
-    console.log(JSON.stringify({ event: "IGNORED_EDIT", mid: body.edited_channel_post.message_id }));
-    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "edited_post" }), { headers: { "Content-Type": "application/json" } });
-  }
-
   const msg = body ? (body.channel_post || body.message) : null;
   if (!msg) return new Response(JSON.stringify({ ok: true, ignored: true }), { headers: { "Content-Type": "application/json" } });
 
@@ -760,19 +719,12 @@ async function onWebhook(request, env) {
   let resp;
   if (msg.media_group_id) {
     const album = await addToAlbum(KV, msg, c);
-    if (!album) {
-      resp = { ok: true, ignored: true, reason: "duplicate_album_msg" };
-    } else {
-      resp = { ok: true, queued: "album_collecting", items: album.items.length };
-      console.log(JSON.stringify({ event: "ALBUM_RECEIVED", mid: msg.message_id }));
-    }
+    resp = { ok: true, queued: "album_collecting", items: album.items.length };
+    console.log(JSON.stringify({ event: "ALBUM_RECEIVED", mid: msg.message_id }));
   } else {
     const result = await enqueueSingle(KV, msg, c);
-    if (result.duplicated) {
-      resp = { ok: true, ignored: true, reason: "duplicate", detail: result.reason };
-      s.deduped = (s.deduped || 0) + 1;
-      await saveSched(KV, s);
-    } else {
+    if (result.duplicated) resp = { ok: true, ignored: true, reason: "duplicate" };
+    else {
       resp = { ok: true, queued: result.item.type };
       console.log(JSON.stringify({ event: "MESSAGE_QUEUED", type: result.item.type, mid: msg.message_id }));
     }
@@ -846,7 +798,7 @@ async function onCron(env) {
     if (c.admin && now - (s.lastReportAt || 0) >= c.reportInt * 1000) {
       const q = await listPrefix(KV, QP, 1000);
       const d = await listPrefix(KV, DP, 100);
-      const txt = "📊 گزارش mynote_bot (V21)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n🧹 تمیزکاری: " + (c.cleanCaptions ? "روشن" : "خاموش") + "\n\n📥 دریافتی: " + s.received + "\n📤 ارسال موفق: " + s.sent + "\n🚫 رد شده (تکراری): " + (s.deduped || 0) + "\n🔁 Retry: " + s.retries + "\n☠️ DLQ: " + d.length + "\n❌ Failed: " + s.failed + "\n📦 صف: " + q.length + "\n⏭ ارسال بعدی: " + (s.nextSendAt ? iso(s.nextSendAt) : "—") + "\n\n" + (s.lastError ? "⚠️ خطا: " + s.lastError : "✅ بدون خطا");
+      const txt = "📊 گزارش mynote_bot (V20)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n🧹 تمیزکاری: " + (c.cleanCaptions ? "روشن" : "خاموش") + "\n\n📥 دریافتی: " + s.received + "\n📤 ارسال موفق: " + s.sent + "\n🔁 Retry: " + s.retries + "\n☠️ DLQ: " + d.length + "\n❌ Failed: " + s.failed + "\n📦 صف: " + q.length + "\n⏭ ارسال بعدی: " + (s.nextSendAt ? iso(s.nextSendAt) : "—") + "\n\n" + (s.lastError ? "⚠️ خطا: " + s.lastError : "✅ بدون خطا");
       try {
         await bale(env, "sendMessage", { chat_id: c.admin, text: txt });
         s.lastReportAt = now;
@@ -896,6 +848,7 @@ function isAdmin(req, env) {
   if (auth === "Bearer " + key) return true;
   return new URL(req.url).searchParams.get("key") === key;
 }
+
 function json(obj, status) {
   return new Response(JSON.stringify(obj), { status: status || 200, headers: { "Content-Type": "application/json" } });
 }
@@ -1016,7 +969,7 @@ export default {
       try {
         const payload = {
           url: webhookUrl,
-          allowed_updates: ["message", "channel_post"],
+          allowed_updates: ["message", "channel_post", "edited_channel_post"],
           drop_pending_updates: false
         };
         if (env.BALE_WEBHOOK_SECRET) payload.secret_token = env.BALE_WEBHOOK_SECRET;
@@ -1040,13 +993,6 @@ export default {
       } catch (e) {
         return json({ ok: false, error: e.message }, 500);
       }
-    }
-
-    // ===== پاکسازی seen_msg های قدیمی (اختیاری) =====
-    if (p === "/admin/cleanup-seen") {
-      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const list = await KV.list({ prefix: MSG_SEEN_PREFIX, limit: 1000 });
-      return json({ ok: true, seen_count: list.keys.length, note: "TTL خودکار 30 روزه فعال است" });
     }
 
     if (p === "/") {
