@@ -14,7 +14,6 @@ DEST_CHANNEL_USERNAME = "yadbegirim"
 ADMIN_ID = "1381797564"
 
 # کلید ادمین برای endpoint های /admin/*
-# (یه رمز قوی و تصادفی بذار - همین جا بمونه، هیچ‌جا دیگه نذار)
 ADMIN_KEY = "In58#935MinT"
 
 # تنظیمات عملکرد
@@ -32,7 +31,8 @@ LOCK_TTL_SEC = "120"
 SEEN_TTL_SEC = "604800"
 DLQ_TTL_SEC = "2592000"
 MAX_RETRIES = "5"
-HASH_HISTORY = "500"
+HASH_HISTORY = "2000"
+LIST_LIMIT = "50"
 
 # ============================================================
 # 🔐 اتصال KV
@@ -42,24 +42,19 @@ binding = "MYNOTE_KV"
 id = "c0e487e2c5da4e46a61ce8dd2965ea96"
 
 # ============================================================
-# ⏰ Cron Triggers (هر ۱ دقیقه بیدار شو)
+# ⏰ Cron Triggers (هر 3 دقیقه بیدار شو)
 # ============================================================
 [triggers]
 crons = ["*/3 * * * *"]
 
 # ============================================================
-# 📊 Observability (لاگ‌گیری و Traces)
+# 📊 Observability (فقط لاگ — بخش traces حذف شد)
 # ============================================================
 [observability]
-enabled = false
+enabled = true
 
 [observability.logs]
 enabled = true
 head_sampling_rate = 1
 persist = true
 invocation_logs = true
-
-[observability.traces]
-enabled = true
-persist = true
-head_sampling_rate = 1
