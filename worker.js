@@ -1,35 +1,32 @@
 /* ============================================================
-   mynote_bot — V19.1 TAG-MENU + WEBHOOK-MGMT
-   - V18 + سیستم مدیریت هشتگ داخل خود بات
-   - منوی تو در تو (Home → 🏷️ → زیرمنو)
-   - بانک هشتگ در KV (معمولی + JSON خودکار)
-   - نرمال‌سازی (کشیده/ی ک عربی)
-   - دکمه 🔍 تست هشتگ
-   - دکمه ❌ لغو = برگشت به خانه
-   - تشخیص کلمات جدید vs به‌روزرسانی
-   - مدیریت وب‌هوک از داخل بات
+   mynote_bot — V25 DEBUG EDITION
+   - دیباگر داخلی: هر webhook ذخیره می‌شود
+   - endpoint /admin/last-webhook برای بررسی پست‌های رد شده
+   - پشتیبانی از edited_channel_post (اختیاری)
+   - لاگ‌های دقیق در هر چک رد
+   - state واحد برای پلن رایگان
+   - سازگار با سقف 1000 نوشتن/روز
 ============================================================ */
-const VERSION = "V19.1-TAG-MENU-2026-08-14";
+const VERSION = "V25-DEBUG-2026-08-24";
 const BALE_BASE = "https://tapi.bale.ai/bot";
+
+const STATE_KEY = "mynote:state25";
+const QLOCK_KEY = "mynote:qlock25";
+const MIG_KEY = "mynote:migrated25";
+const LAST_WEBHOOK_KEY = "mynote:last_webhook";
+const HASHTAG_BANK_KEY = "mynote:hashtag_bank";
+const TAG_STATE_PREFIX = "mynote:tag_state:";
+const CLEAN_RULES_KEY = "mynote:cleaning_rules";
 
 const DEFAULTS = {
   MIN_DELAY_SEC: 180, MAX_DELAY_SEC: 600,
   WINDOW_START_MIN: 510, WINDOW_END_MIN: 1350,
-  ALBUM_QUIET_SEC: 20, ALBUM_TTL_SEC: 900,
-  REPORT_INTERVAL_SEC: 3600, LOCK_TTL_SEC: 120,
-  SEEN_TTL_SEC: 604800, DLQ_TTL_SEC: 2592000,
-  MAX_RETRIES: 5, HASH_HISTORY: 500
+  ALBUM_QUIET_SEC: 20, REPORT_INTERVAL_SEC: 3600,
+  DLQ_TTL_SEC: 2592000, MAX_RETRIES: 5, HASH_HISTORY: 2000
 };
 
-const HASHTAG_BANK_KEY = "mynote:hashtag_bank";
-const TAG_STATE_PREFIX = "mynote:tag_state:";
-
-/* ============================================================
-   🏷️ بانک پیش‌فرض (fallback در KV)
-============================================================ */
 const DEFAULT_BANK = {
-  branding: "#یادبگیریم",
-  fallback: "#دانستنی",
+  branding: "#یادبگیریم", fallback: "#دانستنی",
   keywords: {
     'غذا': ['#تغذیه'], 'کیوی': ['#سلامتی'], 'سیگار': ['#سلامتی'],
     'تاریخ': ['#تاریخ'], 'ایران': ['#ایران'], 'کوروش': ['#تاریخ'],
@@ -45,38 +42,20 @@ const DEFAULT_BANK = {
   }
 };
 
-/* ============================================================
-   🗂️ منوها — قابل توسعه با اضافه کردن یک entry
-============================================================ */
-const T_HASHTAG = "🏷️ هشتگ";
-const T_ADD = "➕ افزودن کلمه";
-const T_DEL = "🗑️ حذف کلمه";
-const T_LIST = "📋 مشاهده لیست";
-const T_TEST = "🔍 تست هشتگ";
-const T_CANCEL = "❌ لغو";
-
+const T_HASHTAG = "🏷️ هشتگ", T_ADD = "➕ افزودن", T_DEL = "🗑️ حذف",
+      T_LIST = "📋 لیست", T_TEST = "🔍 تست", T_CANCEL = "❌ لغو";
 const MENUS = {
-  home: {
-    text: "🛠️ منوی مدیریت mynote_bot\nیکی را انتخاب کن:",
-    rows: [[T_HASHTAG]]
-  },
-  hashtag: {
-    text: "🏷️ مدیریت هشتگ — یکی را انتخاب کن:",
-    rows: [
-      [T_ADD, T_DEL],
-      [T_LIST, T_TEST],
-      [T_CANCEL]
-    ]
-  }
+  home: { text: "🛠️ منوی مدیریت", rows: [[T_HASHTAG]] },
+  hashtag: { text: "🏷️ مدیریت هشتگ", rows: [[T_ADD, T_DEL], [T_LIST, T_TEST], [T_CANCEL]] }
 };
 
 /* ============================================================
-   config / time
+   پیکربندی
 ============================================================ */
 function cfg(env) {
   const n = (name, fb) => { const v = Number(env?.[name]); return Number.isFinite(v) ? v : fb; };
   return {
-    source: String(env.SOURCE_CHANNEL_ID || env.SOURCE_CHAT_ID || "4743880175"),
+    source: String(env.SOURCE_CHANNEL_ID || env.SOURCE_CHAT_ID || ""),
     dest: String(env.DEST_CHANNEL_ID || env.DESTINATION_CHAT_ID || env.TARGET_CHAT_ID || ""),
     destUsername: String(env.DEST_CHANNEL_USERNAME || "yadbegirim"),
     admin: String(env.ADMIN_ID || ""),
@@ -85,13 +64,11 @@ function cfg(env) {
     windowEnd: Math.max(0, n("WINDOW_END_MIN", DEFAULTS.WINDOW_END_MIN)),
     cleanCaptions: String(env.CLEAN_CAPTIONS || "on") === "on",
     deleteSource: String(env.DELETE_SOURCE || "off") === "on",
+    acceptEdits: String(env.ACCEPT_EDITS || "off") === "on",
     minDelay: Math.max(60, n("MIN_DELAY_SEC", DEFAULTS.MIN_DELAY_SEC)),
     maxDelay: Math.max(60, n("MAX_DELAY_SEC", DEFAULTS.MAX_DELAY_SEC)),
     albumQuiet: Math.max(15, n("ALBUM_QUIET_SEC", DEFAULTS.ALBUM_QUIET_SEC)),
-    albumTtl: Math.max(60, n("ALBUM_TTL_SEC", DEFAULTS.ALBUM_TTL_SEC)),
     reportInt: Math.max(3600, n("REPORT_INTERVAL_SEC", DEFAULTS.REPORT_INTERVAL_SEC)),
-    lockTtl: Math.max(60, n("LOCK_TTL_SEC", DEFAULTS.LOCK_TTL_SEC)),
-    seenTtl: Math.max(60, n("SEEN_TTL_SEC", DEFAULTS.SEEN_TTL_SEC)),
     dlqTtl: Math.max(60, n("DLQ_TTL_SEC", DEFAULTS.DLQ_TTL_SEC)),
     maxRetries: Math.max(1, n("MAX_RETRIES", DEFAULTS.MAX_RETRIES)),
     hashHistory: Math.max(100, n("HASH_HISTORY", DEFAULTS.HASH_HISTORY))
@@ -106,22 +83,15 @@ function inWindow(c) {
   const m = iranMinutes();
   return m >= c.windowStart && m <= c.windowEnd;
 }
-function iso(ms = Date.now()) { return new Date(ms).toISOString(); }
-
-/* ============================================================
-   نرمال‌سازی متن (کشیده + ی/ک عربی)
-============================================================ */
+function iso(ms) { return new Date(ms || Date.now()).toISOString(); }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 function normalizeText(t) {
-  return (t || "")
-    .replace(/\u0640+/g, "")
-    .replace(/ك/g, "ک")
-    .replace(/ي/g, "ی")
-    .replace(/\s+/g, " ")
-    .trim();
+  return (t || "").replace(/\u0640+/g, "").replace(/ك/g, "ک")
+    .replace(/ي/g, "ی").replace(/\s+/g, " ").trim();
 }
 
 /* ============================================================
-   🧹 تمیزکاری پایه (داخل کد)
+   تمیزکاری + هشتگ
 ============================================================ */
 function cleanText(text, entities) {
   if (!text) return "";
@@ -130,24 +100,27 @@ function cleanText(text, entities) {
     const sorted = [...entities].sort((a, b) => (b.offset || 0) - (a.offset || 0));
     for (const ent of sorted) {
       if (!ent || ent.offset == null || ent.length == null) continue;
-      if (["text_link", "url", "mention"].includes(ent.type)) {
+      if (["text_link", "url", "mention"].includes(ent.type))
         t = t.substring(0, ent.offset) + t.substring(ent.offset + ent.length);
-      }
     }
   }
-  const lines = t.split("\n").map(line => {
+  const lines = t.split("\n").map(function (line) {
     let l = line;
     l = l.replace(/\u0640+/g, "");
     l = l.replace(/\[[^\]]*\]\([^)]*\)?/g, "");
     l = l.replace(/https?:\/\/[^\s]+/g, "");
     l = l.replace(/ble\.ir\/[^\s]*/g, "");
     l = l.replace(/t\.me\/[^\s]*/g, "");
-    l = l.replace(/[Ⓜ🅰🅱🆎🅾]/g, "");
     l = l.replace(/@[a-zA-Z0-9_]+/g, "");
     l = l.replace(/#[^\s]+/g, "");
     l = l.replace(/[\*]+/g, "");
-    l = l.replace(/[➖➕🔻🔸▫️▪️◽◾•●○✓✗]/g, "");
+    l = l.replace(/\uFFFD/g, "");
+    l = l.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "");
+    l = l.replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+    l = l.replace(/[\u200B\u200D\uFE0F]/g, "");
     const n = l.trim();
+    if (!n || /^[\s\u200C]*$/.test(n)) return "";
+    if (!/[\p{L}\p{N}]/u.test(n) && /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(n)) return "";
     if (/دانستنی\s*های\s*جالب/.test(n)) return "";
     if (/پیشنهاد مجله/.test(n)) return "";
     if (/حتما.{0,25}کارت.{0,25}میاد/.test(n)) return "";
@@ -157,107 +130,55 @@ function cleanText(text, entities) {
     if (/کانال ما/.test(n)) return "";
     return n;
   });
-  return lines.filter(x => x.length > 0).join("\n").trim();
+  return lines.filter(function (x) { return x.length > 0; }).join("\n").trim();
 }
 
-/* ============================================================
-   🏷️ بانک هشتگ (KV + fallback)
-============================================================ */
 async function loadHashtagBank(kv) {
   try {
     const bank = await kv.get(HASHTAG_BANK_KEY, "json");
-    if (bank && bank.keywords) {
-      return {
-        branding: bank.branding || DEFAULT_BANK.branding,
-        fallback: bank.fallback || DEFAULT_BANK.fallback,
-        keywords: bank.keywords
-      };
-    }
-  } catch (e) {
-    console.log(JSON.stringify({ event: "BANK_LOAD_ERROR", err: e.message }));
-  }
-  return {
-    branding: DEFAULT_BANK.branding,
-    fallback: DEFAULT_BANK.fallback,
-    keywords: { ...DEFAULT_BANK.keywords }
-  };
+    if (bank && bank.keywords) return { branding: bank.branding || DEFAULT_BANK.branding, fallback: bank.fallback || DEFAULT_BANK.fallback, keywords: bank.keywords };
+  } catch (e) { /* ignore */ }
+  return { branding: DEFAULT_BANK.branding, fallback: DEFAULT_BANK.fallback, keywords: Object.assign({}, DEFAULT_BANK.keywords) };
 }
-async function saveHashtagBank(kv, bank) {
-  await kvPutJSON(kv, HASHTAG_BANK_KEY, bank, 2592000);
-}
-
-/* ============================================================
-   🎯 تولید هشتگ با استفاده از بانک KV
-============================================================ */
+async function saveHashtagBank(kv, bank) { await kvPutJSON(kv, HASHTAG_BANK_KEY, bank, 2592000); }
 async function getSmartTags(kv, text) {
   const bank = await loadHashtagBank(kv);
-  const selected = new Set();
-  selected.add(bank.branding);
+  const selected = new Set(); selected.add(bank.branding);
   const normalized = normalizeText(text || "");
-  for (const [keyword, tags] of Object.entries(bank.keywords)) {
-    if (keyword && normalized.includes(normalizeText(keyword))) {
-      (Array.isArray(tags) ? tags : [tags]).forEach(t => selected.add(t));
-    }
+  for (const entry of Object.entries(bank.keywords)) {
+    if (entry[0] && normalized.includes(normalizeText(entry[0])))
+      (Array.isArray(entry[1]) ? entry[1] : [entry[1]]).forEach(function (t) { selected.add(t); });
   }
   if (selected.size === 1) selected.add(bank.fallback);
   return Array.from(selected).slice(0, 3).join(" ");
 }
-
 async function buildCaption(kv, rawCaption, entities, destUsername) {
   const clean = cleanText(rawCaption || "", entities);
   if (!clean) return null;
-  const tags = await getSmartTags(kv, clean);
-  return `${clean}\n\n📌 منبع: @${destUsername}\n\n${tags}`;
+  return clean + "\n\n📌 منبع: @" + destUsername + "\n\n" + (await getSmartTags(kv, clean));
 }
-
-/* ============================================================
-   🎛️ قوانین سفارشی (KV)
-============================================================ */
 async function loadCleaningRules(kv) {
-  try {
-    return (await kv.get("mynote:cleaning_rules", "json")) || {
-      forbidden_phrases: [], forbidden_regex: [],
-      replace_rules: [], remove_emojis: [], remove_lines: []
-    };
-  } catch { return { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] }; }
+  try { return (await kv.get(CLEAN_RULES_KEY, "json")) || { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] }; }
+  catch (e) { return { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] }; }
 }
 async function applyCustomRules(kv, text) {
   if (!text) return text;
   const rules = await loadCleaningRules(kv);
   let lines = text.split("\n");
-  for (const phrase of rules.forbidden_phrases || []) {
-    if (!phrase) continue;
-    lines = lines.map(l => l.split(phrase).join(""));
-  }
-  for (const pattern of rules.remove_lines || []) {
-    if (!pattern) continue;
-    lines = lines.filter(l => !l.includes(pattern));
-  }
-  for (const rx of rules.forbidden_regex || []) {
-    if (!rx) continue;
-    try { const re = new RegExp(rx, "gi"); lines = lines.map(l => l.replace(re, "")); } catch {}
-  }
-  for (const rule of rules.replace_rules || []) {
-    if (!rule || !rule.from) continue;
-    lines = lines.map(l => l.split(rule.from).join(rule.to || ""));
-  }
-  for (const emoji of rules.remove_emojis || []) {
-    if (!emoji) continue;
-    lines = lines.map(l => l.split(emoji).join(""));
-  }
-  return lines.map(l => l.trim()).filter(x => x.length > 0).join("\n").trim();
+  for (const phrase of rules.forbidden_phrases || []) { if (!phrase) continue; lines = lines.map(function (l) { return l.split(phrase).join(""); }); }
+  for (const pattern of rules.remove_lines || []) { if (!pattern) continue; lines = lines.filter(function (l) { return !l.includes(pattern); }); }
+  for (const rx of rules.forbidden_regex || []) { if (!rx) continue; try { const re = new RegExp(rx, "gi"); lines = lines.map(function (l) { return l.replace(re, ""); }); } catch (e) { /* ignore */ } }
+  for (const rule of rules.replace_rules || []) { if (!rule || !rule.from) continue; lines = lines.map(function (l) { return l.split(rule.from).join(rule.to || ""); }); }
+  for (const emoji of rules.remove_emojis || []) { if (!emoji) continue; lines = lines.map(function (l) { return l.split(emoji).join(""); }); }
+  return lines.map(function (l) { return l.trim(); }).filter(function (x) { return x.length > 0; }).join("\n").trim();
 }
 
 function contentHash(text, fileId) {
-  const content = (text || "").slice(0, 100) + (fileId || "");
+  const content = normalizeText(text || "").slice(0, 150) + "|" + (fileId || "");
   let h = 0;
   for (let i = 0; i < content.length; i++) { h = ((h << 5) - h) + content.charCodeAt(i); h |= 0; }
   return Math.abs(h).toString(36);
 }
-
-/* ============================================================
-   نوع پیام + fileId
-============================================================ */
 function detectType(msg) {
   if (msg.photo && msg.photo.length) return "photo";
   if (msg.video) return "video";
@@ -281,177 +202,138 @@ function extractFileId(msg, type) {
 }
 
 /* ============================================================
-   KV / API
+   KV
 ============================================================ */
 async function kvGetJSON(kv, key) {
   try { return await kv.get(key, { type: "json", cacheTtl: 30 }); }
-  catch (e) { console.log(JSON.stringify({ event: "KV_GET_ERROR", key, err: e.message })); throw e; }
+  catch (e) { throw e; }
 }
 async function kvPutJSON(kv, key, value, ttl) {
   try {
     const opts = ttl ? { expirationTtl: Math.max(60, Math.floor(ttl)) } : {};
     await kv.put(key, JSON.stringify(value), opts);
-  } catch (e) { console.log(JSON.stringify({ event: "KV_PUT_ERROR", key, err: e.message })); throw e; }
+  } catch (e) {
+    console.log(JSON.stringify({ event: "KV_PUT_ERROR", key: key, err: e.message }));
+    throw e;
+  }
 }
-async function kvPutText(kv, key, value, ttl) {
-  try {
-    const opts = ttl ? { expirationTtl: Math.max(60, Math.floor(ttl)) } : {};
-    await kv.put(key, String(value), opts);
-  } catch (e) { console.log(JSON.stringify({ event: "KV_PUT_TEXT_ERROR", key, err: e.message })); throw e; }
-}
-async function kvDeleteSafe(kv, key) {
-  try { await kv.delete(key); } catch {}
-}
+async function kvDeleteSafe(kv, key) { try { await kv.delete(key); } catch (e) { /* ignore */ } }
 
 async function bale(env, method, payload) {
   const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
   if (!token) throw new Error("BALE_BOT_TOKEN missing");
-  const res = await fetch(BALE_BASE + token + "/" + method, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
-  });
-  const data = await res.json().catch(() => null);
+  const res = await fetch(BALE_BASE + token + "/" + method, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const data = await res.json().catch(function () { return null; });
   if (!res.ok || !data || data.ok !== true) {
-    const e = new Error(`Bale ${method}: ${(data && data.description) || res.status}`);
+    const e = new Error("Bale " + method + ": " + ((data && data.description) || res.status));
     e.status = res.status;
-    e.retryAfter = data?.parameters?.retry_after || null;
-    e.retryable = res.status === 429 || res.status >= 500 || !data;
+    e.retryAfter = data && data.parameters ? data.parameters.retry_after : null;
     throw e;
   }
   return data.result;
 }
 
 /* ============================================================
-   کلیدهای KV
+   STATE واحد + قفل
 ============================================================ */
-const QP = "v19:q:";
-const AP = "v19:album:";
-const DP = "v19:dlq:";
-const HASH_KEY = "v19:hashes";
+function emptyState() {
+  return { items: [], albums: {}, dlq: [], hashes: [], sched: { nextSendAt: 0, lastSendAt: 0, lastReportAt: 0, sent: 0, failed: 0, retries: 0, received: 0, ignored: 0, lastError: null, lastIgnoreReason: null } };
+}
+async function readState(kv) { return (await kvGetJSON(kv, STATE_KEY)) || emptyState(); }
 
-async function listPrefix(kv, prefix, limit = 1000) {
-  const r = await kv.list({ prefix, limit });
-  const items = [];
-  for (const k of r.keys) {
-    const v = await kvGetJSON(kv, k.name);
-    if (v) items.push({ key: k.name, item: v });
+async function tryLock(kv, key, tries, waitMs) {
+  for (let i = 0; i < tries; i++) {
+    const existing = await kv.get(key);
+    if (!existing) {
+      const token = crypto.randomUUID();
+      await kv.put(key, token, { expirationTtl: 60 });
+      const conf = await kv.get(key);
+      if (conf === token) return token;
+    }
+    if (i < tries - 1) await sleep(waitMs);
   }
-  return items.sort((a, b) => (a.item.createdAt || 0) - (b.item.createdAt || 0));
+  return null;
 }
-
-async function checkAndAddHash(kv, c, hash) {
-  if (!hash) return false;
-  const list = (await kvGetJSON(kv, HASH_KEY)) || [];
-  if (list.includes(hash)) return true;
-  list.push(hash);
-  while (list.length > c.hashHistory) list.shift();
-  await kvPutJSON(kv, HASH_KEY, list, 2592000);
-  return false;
+async function unlock(kv, key, token) {
+  if (!token) return;
+  if ((await kv.get(key)) === token) await kvDeleteSafe(kv, key);
 }
-
-async function getSched(kv) {
-  return (await kvGetJSON(kv, "v19:sched")) || {
-    nextSendAt: 0, lastSendAt: 0, lastReportAt: 0,
-    sent: 0, failed: 0, retries: 0, received: 0, lastError: null
-  };
-}
-async function saveSched(kv, s) { await kvPutJSON(kv, "v19:sched", s, 2592000); }
-
-async function acquireLock(kv, c) {
-  const existing = await kv.get("v19:lock");
-  if (existing) return null;
-  const token = crypto.randomUUID();
-  await kv.put("v19:lock", token, { expirationTtl: c.lockTtl });
-  return (await kv.get("v19:lock")) === token ? token : null;
-}
-async function releaseLock(kv, token) {
-  if (token && (await kv.get("v19:lock")) === token) await kv.delete("v19:lock");
-}
-
-async function isDup(kv, c, updateId) {
-  if (updateId == null) return false;
-  const key = "v19:seen:" + updateId;
-  if (await kv.get(key)) return true;
-  await kvPutText(kv, key, "1", c.seenTtl);
-  return false;
-}
-
-async function checkSource(kv, c, chatId) {
-  if (c.source) {
-    return String(chatId) === c.source || String(chatId) === "-100" + c.source;
+async function withState(kv, mutate) {
+  const token = await tryLock(kv, QLOCK_KEY, 12, 100);
+  try {
+    const st = await readState(kv);
+    const out = mutate(st) || {};
+    await kvPutJSON(kv, STATE_KEY, st, 2592000);
+    return out;
+  } finally {
+    await unlock(kv, QLOCK_KEY, token);
   }
-  return true;
 }
 
 /* ============================================================
-   ساخت آیتم صف
+   مهاجرت از نسخه‌های قبل
 ============================================================ */
+async function migrate(kv) {
+  if (await kv.get(MIG_KEY)) return;
+  try {
+    const oldQueue = (await kvGetJSON(kv, "mynote:queue")) || [];
+    const oldDlq = (await kvGetJSON(kv, "mynote:dlq")) || [];
+    const oldAlbums = (await kvGetJSON(kv, "mynote:albums")) || {};
+    const oldHashes = (await kvGetJSON(kv, "mynote:hashes")) || [];
+    const oldSched = (await kvGetJSON(kv, "mynote:sched")) || null;
+    const oldState24 = (await kvGetJSON(kv, "mynote:state24")) || null;
+
+    await withState(kv, function (st) {
+      // از state24 اگر وجود دارد
+      if (oldState24) {
+        for (const it of (oldState24.items || [])) { if (!st.items.some(function (x) { return x.id === it.id; })) st.items.push(it); }
+        for (const it of (oldState24.dlq || [])) st.dlq.push(it);
+        for (const h of (oldState24.hashes || [])) { if (!st.hashes.includes(h)) st.hashes.push(h); }
+        Object.assign(st.albums, oldState24.albums || {});
+        if (oldState24.sched) Object.assign(st.sched, oldState24.sched);
+      }
+      // از queue/dlq/albums/old
+      for (const it of oldQueue) { if (!st.items.some(function (x) { return x.id === it.id; })) st.items.push(it); }
+      for (const it of oldDlq) st.dlq.push(it);
+      for (const mgid of Object.keys(oldAlbums)) {
+        const a = oldAlbums[mgid];
+        if (a && a.items && a.items.length) {
+          st.items.push({ id: a.id, type: "album", sourceChatId: a.sourceChatId, mediaGroupId: a.mediaGroupId, items: a.items, createdAt: Date.now(), attempts: 0, state: "pending", retryAt: 0 });
+        }
+      }
+      for (const h of oldHashes) { if (!st.hashes.includes(h)) st.hashes.push(h); }
+      if (oldSched) Object.assign(st.sched, oldSched);
+      return {};
+    });
+    // پاکسازی کلیدهای قدیمی
+    await kvDeleteSafe(kv, "mynote:queue");
+    await kvDeleteSafe(kv, "mynote:dlq");
+    await kvDeleteSafe(kv, "mynote:albums");
+    await kvDeleteSafe(kv, "mynote:sched");
+    await kvDeleteSafe(kv, "mynote:state24");
+    console.log(JSON.stringify({ event: "MIGRATED", items: oldQueue.length + (oldState24?.items?.length || 0) }));
+  } catch (e) {
+    console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message }));
+  }
+  await kvPutJSON(kv, MIG_KEY, { at: Date.now() }, 2592000);
+}
+
 function buildItemFromMessage(msg) {
   const type = detectType(msg);
   const fileId = extractFileId(msg, type);
   const caption = msg.caption || msg.text || "";
   const entities = msg.caption_entities || msg.entities || [];
   return {
-    id: `msg-${msg.chat.id}-${msg.message_id}`,
-    type,
-    sourceChatId: String(msg.chat.id),
-    sourceMessageId: Number(msg.message_id),
-    fileId, caption, entities,
+    id: "msg-" + msg.chat.id + "-" + msg.message_id,
+    type: type, sourceChatId: String(msg.chat.id), sourceMessageId: Number(msg.message_id),
+    fileId: fileId, caption: caption, entities: entities,
     hash: contentHash(caption, fileId),
-    createdAt: Date.now(),
-    attempts: 0, state: "pending", retryAt: 0
+    createdAt: Date.now(), attempts: 0, state: "pending", retryAt: 0
   };
-}
-
-async function enqueueSingle(kv, msg, c) {
-  const item = buildItemFromMessage(msg);
-  if (await checkAndAddHash(kv, c, item.hash)) {
-    console.log(JSON.stringify({ event: "DUPLICATE_CONTENT", hash: item.hash }));
-    return { duplicated: true };
-  }
-  const key = QP + item.createdAt + "-" + crypto.randomUUID().slice(0, 8);
-  await kvPutJSON(kv, key, item, c.dlqTtl);
-  return { item, key };
-}
-
-async function addToAlbum(kv, msg, c) {
-  const key = AP + msg.chat.id + ":" + msg.media_group_id;
-  let album = (await kvGetJSON(kv, key)) || {
-    id: `album-${msg.chat.id}-${msg.media_group_id}`,
-    type: "album",
-    sourceChatId: String(msg.chat.id),
-    mediaGroupId: String(msg.media_group_id),
-    items: [], createdAt: Date.now(), updatedAt: Date.now()
-  };
-  const item = buildItemFromMessage(msg);
-  if (!album.items.find(x => x.sourceMessageId === item.sourceMessageId)) album.items.push(item);
-  album.updatedAt = Date.now();
-  await kvPutJSON(kv, key, album, c.albumTtl);
-  return album;
-}
-
-async function finalizeAlbums(kv, c) {
-  const list = await listPrefix(kv, AP, 1000);
-  const now = Date.now();
-  let finalized = 0;
-  for (const { key, item: album } of list) {
-    if (now - album.updatedAt < c.albumQuiet * 1000) continue;
-    if (!album.items || album.items.length === 0) { await kv.delete(key); continue; }
-    const queueItem = {
-      id: album.id, type: "album",
-      sourceChatId: album.sourceChatId,
-      mediaGroupId: album.mediaGroupId,
-      items: album.items,
-      createdAt: album.createdAt, attempts: 0, state: "pending", retryAt: 0
-    };
-    await kvPutJSON(kv, QP + album.createdAt + "-" + crypto.randomUUID().slice(0, 8), queueItem, c.dlqTtl);
-    await kv.delete(key);
-    finalized++;
-  }
-  return finalized;
 }
 
 /* ============================================================
-   📤 ارسال
+   ارسال
 ============================================================ */
 async function makeCaption(env, kv, item) {
   const c = cfg(env);
@@ -462,25 +344,23 @@ async function makeCaption(env, kv, item) {
   }
   return caption;
 }
-
 async function sendSingle(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
   const caption = await makeCaption(env, kv, item);
   let method, payload;
   switch (item.type) {
-    case "photo":     method = "sendPhoto";    payload = { chat_id: c.dest, photo: item.fileId, caption: caption || undefined }; break;
-    case "video":     method = "sendVideo";    payload = { chat_id: c.dest, video: item.fileId, caption: caption || undefined }; break;
-    case "document":  method = "sendDocument"; payload = { chat_id: c.dest, document: item.fileId, caption: caption || undefined }; break;
-    case "audio":     method = "sendAudio";    payload = { chat_id: c.dest, audio: item.fileId, caption: caption || undefined }; break;
-    case "voice":     method = "sendVoice";    payload = { chat_id: c.dest, voice: item.fileId, caption: caption || undefined }; break;
-    case "animation": method = "sendAnimation";payload = { chat_id: c.dest, animation: item.fileId, caption: caption || undefined }; break;
-    case "sticker":   method = "sendSticker";  payload = { chat_id: c.dest, sticker: item.fileId }; break;
-    default:          method = "sendMessage";  payload = { chat_id: c.dest, text: caption || item.caption || "—" };
+    case "photo": method = "sendPhoto"; payload = { chat_id: c.dest, photo: item.fileId, caption: caption || undefined }; break;
+    case "video": method = "sendVideo"; payload = { chat_id: c.dest, video: item.fileId, caption: caption || undefined }; break;
+    case "document": method = "sendDocument"; payload = { chat_id: c.dest, document: item.fileId, caption: caption || undefined }; break;
+    case "audio": method = "sendAudio"; payload = { chat_id: c.dest, audio: item.fileId, caption: caption || undefined }; break;
+    case "voice": method = "sendVoice"; payload = { chat_id: c.dest, voice: item.fileId, caption: caption || undefined }; break;
+    case "animation": method = "sendAnimation"; payload = { chat_id: c.dest, animation: item.fileId, caption: caption || undefined }; break;
+    case "sticker": method = "sendSticker"; payload = { chat_id: c.dest, sticker: item.fileId }; break;
+    default: method = "sendMessage"; payload = { chat_id: c.dest, text: caption || item.caption || "—" };
   }
   return await bale(env, method, payload);
 }
-
 async function sendAlbum(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
@@ -491,138 +371,76 @@ async function sendAlbum(env, item) {
     if (sub.type === "video") type = "video";
     else if (sub.type === "document") type = "document";
     else if (sub.type === "audio") type = "audio";
-    media.push({ type, media: sub.fileId, caption: cap || undefined });
+    media.push({ type: type, media: sub.fileId, caption: cap || undefined });
   }
   try {
-    return await bale(env, "sendMediaGroup", { chat_id: c.dest, media });
+    return await bale(env, "sendMediaGroup", { chat_id: c.dest, media: media });
   } catch (e) {
-    console.log(JSON.stringify({ event: "ALBUM_FALLBACK", err: e.message }));
-    let sentCount = 0;
-    for (const sub of item.items) { await sendSingle(env, sub); sentCount++; }
-    if (sentCount === 0) throw e;
-    return { partial: true, sentCount };
+    let n = 0;
+    for (const sub of item.items) { await sendSingle(env, sub); n++; }
+    if (n === 0) throw e;
+    return { partial: true };
   }
 }
-
 async function deleteSourceMessage(env, item) {
   const c = cfg(env);
   if (!c.deleteSource) return;
-  try {
-    await bale(env, "deleteMessage", { chat_id: item.sourceChatId, message_id: item.sourceMessageId });
-  } catch (e) {
-    console.log(JSON.stringify({ event: "DELETE_SOURCE_FAIL", err: e.message }));
-  }
+  try { await bale(env, "deleteMessage", { chat_id: item.sourceChatId, message_id: item.sourceMessageId }); }
+  catch (e) { /* ignore */ }
 }
 
 /* ============================================================
-   🎯 مدیر هشتگ داخل بات
+   منوی هشتگ
 ============================================================ */
-async function getState(kv, chatId) {
-  try { return await kv.get(TAG_STATE_PREFIX + chatId, "json"); }
-  catch { return null; }
-}
-async function setState(kv, chatId, state) {
-  if (!state) { await kvDeleteSafe(kv, TAG_STATE_PREFIX + chatId); return; }
-  await kvPutJSON(kv, TAG_STATE_PREFIX + chatId, state, 3600);
-}
-
-function makeKeyboard(rows) {
-  return { keyboard: rows, resize_keyboard: true };
-}
-
+async function getState2(kv, chatId) { try { return await kv.get(TAG_STATE_PREFIX + chatId, "json"); } catch (e) { return null; } }
+async function setState2(kv, chatId, state) { if (!state) { await kvDeleteSafe(kv, TAG_STATE_PREFIX + chatId); return; } await kvPutJSON(kv, TAG_STATE_PREFIX + chatId, state, 3600); }
+function makeKeyboard(rows) { return { keyboard: rows, resize_keyboard: true }; }
 async function adminSay(env, chatId, text, rows) {
-  const payload = { chat_id: chatId, text };
+  const payload = { chat_id: chatId, text: text };
   if (rows) payload.reply_markup = makeKeyboard(rows);
-  try { await bale(env, "sendMessage", payload); }
-  catch (e) { console.log(JSON.stringify({ event: "ADMIN_SAY_ERROR", err: e.message })); }
+  try { await bale(env, "sendMessage", payload); } catch (e) { /* ignore */ }
 }
-
 function parseAddInput(text) {
   const out = [];
   const lines = text.split("\n");
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
-    // JSON خودکار (آرایه یا شیء)
-    if (line.startsWith("[")) {
+    if (line.startsWith("[") || line.startsWith("{")) {
       try {
-        const arr = JSON.parse(line);
+        const parsed = JSON.parse(line);
+        const arr = Array.isArray(parsed) ? parsed : [parsed];
         for (const obj of arr) {
           if (obj && obj.keyword) {
             const tags = Array.isArray(obj.tags) ? obj.tags : (obj.tag ? [obj.tag] : []);
-            if (tags.length) out.push({ keyword: normalizeText(obj.keyword), tags: tags.map(t => String(t).startsWith("#") ? t : "#" + t) });
+            if (tags.length) out.push({ keyword: normalizeText(obj.keyword), tags: tags.map(function (t) { return String(t).startsWith("#") ? t : "#" + t; }) });
           }
         }
         continue;
-      } catch {}
+      } catch (e) { /* ignore */ }
     }
-    if (line.startsWith("{")) {
-      try {
-        const obj = JSON.parse(line);
-        if (obj && obj.keyword) {
-          const tags = Array.isArray(obj.tags) ? obj.tags : (obj.tag ? [obj.tag] : []);
-          if (tags.length) out.push({ keyword: normalizeText(obj.keyword), tags: tags.map(t => String(t).startsWith("#") ? t : "#" + t) });
-        }
-        continue;
-      } catch {}
-    }
-    // حالت معمولی: "کلمه #tag1 #tag2"
     if (!line.includes("#")) continue;
     const tags = line.match(/#[^\s#]+/g) || [];
     const keyword = normalizeText(line.slice(0, line.indexOf("#")).replace(/[=:：]\s*$/, ""));
-    if (keyword && tags.length) out.push({ keyword, tags });
+    if (keyword && tags.length) out.push({ keyword: keyword, tags: tags });
   }
   return out;
 }
-
 async function handleTagAdmin(env, kv, c, msg) {
   const text = (msg.text || "").trim();
   const chatId = String(msg.chat.id);
-
-  // ---- دکمه‌های منو: اولویت ناوبری ----
-  if (text === "/start" || text === "/menu" || text === "/tags") {
-    await setState(kv, chatId, null);
-    await adminSay(env, chatId, MENUS.home.text, MENUS.home.rows);
-    return true;
-  }
-  if (text === T_HASHTAG) {
-    await setState(kv, chatId, null);
-    await adminSay(env, chatId, MENUS.hashtag.text, MENUS.hashtag.rows);
-    return true;
-  }
-  if (text === T_CANCEL) {
-    await setState(kv, chatId, null);
-    await adminSay(env, chatId, "🏠 برگشتیم به منوی اصلی", MENUS.home.rows);
-    return true;
-  }
-
-  // ---- ناوبری به زیرمنو (دکمه‌ها) ----
-  if (text === T_ADD) {
-    await setState(kv, chatId, { mode: "adding" });
-    await adminSay(env, chatId,
-      "✏️ هر خط را به این شکل بنویس:\n" +
-      "کلمه #هشتگ1 #هشتگ2\n\n" +
-      "مثال:\n" +
-      "اختاپوس #حیات_وحش #جانوران\n" +
-      "پسته #تغذیه\n" +
-      "هوش مصنوعی #تکنولوژی\n\n" +
-      "وقتی تمام شد «❌ لغو» را بزن."
-    );
-    return true;
-  }
-  if (text === T_DEL) {
-    await setState(kv, chatId, { mode: "deleting" });
-    await adminSay(env, chatId, "🗑️ کلمه‌هایی که می‌خواهی حذف شوند را بفرست (هر خط یکی، یا با ویرگول جدا کن).");
-    return true;
-  }
+  if (text === "/start" || text === "/menu" || text === "/tags") { await setState2(kv, chatId, null); await adminSay(env, chatId, MENUS.home.text, MENUS.home.rows); return true; }
+  if (text === T_HASHTAG) { await setState2(kv, chatId, null); await adminSay(env, chatId, MENUS.hashtag.text, MENUS.hashtag.rows); return true; }
+  if (text === T_CANCEL) { await setState2(kv, chatId, null); await adminSay(env, chatId, "🏠 برگشتیم", MENUS.home.rows); return true; }
+  if (text === T_ADD) { await setState2(kv, chatId, { mode: "adding" }); await adminSay(env, chatId, "✏️ هر خط: کلمه #هشتگ1 #هشتگ2\nپایان: «❌ لغو»"); return true; }
+  if (text === T_DEL) { await setState2(kv, chatId, { mode: "deleting" }); await adminSay(env, chatId, "🗑️ کلمه‌ها را بفرست"); return true; }
   if (text === T_LIST) {
     const bank = await loadHashtagBank(kv);
     const entries = Object.entries(bank.keywords);
-    const header = `📋 بانک هشتگ (${entries.length} کلمه)\n\n`;
+    let cur = "📋 بانک هشتگ (" + entries.length + " کلمه)\n\n";
     const chunks = [];
-    let cur = header;
-    for (const [k, v] of entries) {
-      const line = `• ${k} → ${Array.isArray(v) ? v.join(" ") : v}\n`;
+    for (const entry of entries) {
+      const line = "• " + entry[0] + " → " + (Array.isArray(entry[1]) ? entry[1].join(" ") : entry[1]) + "\n";
       if ((cur + line).length > 3500) { chunks.push(cur); cur = ""; }
       cur += line;
     }
@@ -630,173 +448,188 @@ async function handleTagAdmin(env, kv, c, msg) {
     for (const chunk of chunks) await adminSay(env, chatId, chunk);
     return true;
   }
-  if (text === T_TEST) {
-    await setState(kv, chatId, { mode: "testing" });
-    await adminSay(env, chatId, "🔍 متنی بفرست تا هشتگ‌های تولیدشده برایش را ببینی.");
-    return true;
-  }
-
-  // ---- حالت‌ها ----
-  const state = await getState(kv, chatId);
+  if (text === T_TEST) { await setState2(kv, chatId, { mode: "testing" }); await adminSay(env, chatId, "🔍 متنی بفرست"); return true; }
+  const state = await getState2(kv, chatId);
   if (!state) return false;
-
-  // ==== حالت افزودن کلمه (با تفکیک جدید vs به‌روزرسانی) ====
   if (state.mode === "adding") {
     const parsed = parseAddInput(text);
-    if (!parsed.length) {
-      await adminSay(env, chatId, "⚠️ چیزی نفهمیدم! هر خط باید این شکلی باشه:\nکلمه #هشتگ");
-      return true;
-    }
+    if (!parsed.length) { await adminSay(env, chatId, "⚠️ قالب: کلمه #هشتگ"); return true; }
     const bank = await loadHashtagBank(kv);
-    const newWords = [];
-    const updatedWords = [];
-    for (const p of parsed) {
-      if (bank.keywords[p.keyword]) {
-        updatedWords.push(p);
-      } else {
-        newWords.push(p);
-      }
-      bank.keywords[p.keyword] = p.tags;
-    }
+    let nw = 0, uw = 0;
+    for (const p of parsed) { if (bank.keywords[p.keyword]) uw++; else nw++; bank.keywords[p.keyword] = p.tags; }
     await saveHashtagBank(kv, bank);
-    await setState(kv, chatId, null);
-    
-    // ساخت پیام دقیق‌تر
-    let msgText = "";
-    if (newWords.length > 0) {
-      msgText += `✅ ${newWords.length} کلمه **جدید** اضافه شد:\n`;
-      msgText += newWords.slice(0, 3).map(p => `• ${p.keyword} → ${p.tags.join(" ")}`).join("\n");
-      if (newWords.length > 3) msgText += `\n... و ${newWords.length - 3} مورد دیگر`;
-      msgText += "\n\n";
-    }
-    if (updatedWords.length > 0) {
-      msgText += `🔄 ${updatedWords.length} کلمه **به‌روزرسانی** شد:\n`;
-      msgText += updatedWords.slice(0, 3).map(p => `• ${p.keyword} → ${p.tags.join(" ")}`).join("\n");
-      if (updatedWords.length > 3) msgText += `\n... و ${updatedWords.length - 3} مورد دیگر`;
-      msgText += "\n\n";
-    }
-    msgText += `از پست بعدی استفاده می‌شه 🎯`;
-    await adminSay(env, chatId, msgText, MENUS.hashtag.rows);
+    await setState2(kv, chatId, null);
+    await adminSay(env, chatId, "✅ جدید: " + nw + " | 🔄 به‌روز: " + uw, MENUS.hashtag.rows);
     return true;
   }
-
   if (state.mode === "deleting") {
-    const words = text.split(/[\n,،]+/).map(s => normalizeText(s)).filter(Boolean);
+    const words = text.split(/[\n,،]+/).map(function (s) { return normalizeText(s); }).filter(Boolean);
     const bank = await loadHashtagBank(kv);
     let n = 0;
-    const found = [];
-    for (const w of words) {
-      if (bank.keywords[w]) { delete bank.keywords[w]; n++; found.push(w); }
-    }
+    for (const w of words) { if (bank.keywords[w]) { delete bank.keywords[w]; n++; } }
     await saveHashtagBank(kv, bank);
-    await setState(kv, chatId, null);
-    const msg2 = n
-      ? `🗑️ ${n} کلمه حذف شد:\n${found.join("، ")}`
-      : `⚠️ هیچ‌کدام پیدا نشد.`;
-    await adminSay(env, chatId, msg2, MENUS.hashtag.rows);
+    await setState2(kv, chatId, null);
+    await adminSay(env, chatId, n ? ("🗑️ " + n + " کلمه حذف شد") : "⚠️ پیدا نشد", MENUS.hashtag.rows);
     return true;
   }
-
   if (state.mode === "testing") {
     const bank = await loadHashtagBank(kv);
     const normalized = normalizeText(text);
-    const selected = new Set();
-    selected.add(bank.branding);
+    const selected = new Set(); selected.add(bank.branding);
     const matched = [];
-    for (const [keyword, tags] of Object.entries(bank.keywords)) {
-      const nk = normalizeText(keyword);
-      if (nk && normalized.includes(nk)) {
-        matched.push(keyword);
-        (Array.isArray(tags) ? tags : [tags]).forEach(t => selected.add(t));
-      }
+    for (const entry of Object.entries(bank.keywords)) {
+      const nk = normalizeText(entry[0]);
+      if (nk && normalized.includes(nk)) { matched.push(entry[0]); (Array.isArray(entry[1]) ? entry[1] : [entry[1]]).forEach(function (t) { selected.add(t); }); }
     }
     if (selected.size === 1) selected.add(bank.fallback);
-    const finalTags = Array.from(selected).slice(0, 3);
-    await adminSay(env, chatId,
-      `🔍 نتیجه تست:\n\n` +
-      `کلمات مطابقت‌کرده: ${matched.length ? matched.join("، ") : "هیچ"}\n` +
-      `هشتگ‌های تولیدی: ${finalTags.join(" ")}`
-    );
-    // حالت تست پاک نمی‌شود تا تست‌های بعدی راحت باشند
+    await adminSay(env, chatId, "🔍 کلمات: " + (matched.length ? matched.join("، ") : "هیچ") + "\nهشتگ‌ها: " + Array.from(selected).slice(0, 3).join(" "));
     return true;
   }
-
   return false;
 }
 
 /* ============================================================
-   WEBHOOK
+   🎯 WEBHOOK با دیباگر داخلی
 ============================================================ */
+async function saveLastWebhook(kv, body, verdict, reason) {
+  try {
+    await kvPutJSON(kv, LAST_WEBHOOK_KEY, {
+      at: Date.now(),
+      verdict: verdict,
+      reason: reason,
+      update_id: body?.update_id,
+      has_channel_post: !!(body?.channel_post),
+      has_message: !!(body?.message),
+      has_edited_channel_post: !!(body?.edited_channel_post),
+      has_edited_message: !!(body?.edited_message),
+      keys: Object.keys(body || {}),
+      channel_post_chat_id: body?.channel_post?.chat?.id,
+      channel_post_message_id: body?.channel_post?.message_id,
+      channel_post_media_group_id: body?.channel_post?.media_group_id,
+      channel_post_caption_preview: (body?.channel_post?.caption || body?.channel_post?.text || "").substring(0, 100)
+    }, 3600);
+  } catch (e) { /* ignore */ }
+}
+
 async function onWebhook(request, env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
+
+  // چک secret
+  if (env.BALE_WEBHOOK_SECRET) {
+    const received = request.headers.get("X-Bale-Bot-Api-Secret-Token") || request.headers.get("X-Telegram-Bot-Api-Secret-Token");
+    if (received !== env.BALE_WEBHOOK_SECRET) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+  }
+
   let body;
   try { body = await request.json(); }
-  catch { return new Response("bad json", { status: 400 }); }
+  catch (e) { return new Response("bad json", { status: 400 }); }
 
-  if (await isDup(KV, c, body?.update_id)) {
-    return new Response(JSON.stringify({ ok: true, duplicate: true }), { headers: { "Content-Type": "application/json" } });
-  }
-
+  // 🎯 دیباگ: همیشه webhook را ذخیره کن
   const msg = body?.channel_post || body?.message;
-  if (!msg) return new Response(JSON.stringify({ ok: true, ignored: true }), { headers: { "Content-Type": "application/json" } });
 
-  // ===== لاگ دیباگ برای پیام‌های ادمین =====
-  const chatId = String(msg.chat?.id || "");
-  const chatType = String(msg.chat?.type || "");
-  if (chatId === c.admin) {
-    console.log(JSON.stringify({
-      event: "ADMIN_MESSAGE",
-      chatId, chatType,
-      text: (msg.text || "").substring(0, 50),
-      isAdmin: chatId === c.admin
-    }));
+  // چک ادیت
+  if (!msg && body?.edited_channel_post) {
+    if (c.acceptEdits) {
+      // با ادیت مثل پست عادی رفتار کن
+      const editMsg = body.edited_channel_post;
+      return await processMessage(KV, c, env, editMsg, body, true);
+    }
+    await saveLastWebhook(KV, body, "ignored", "edited_post_not_accepted");
+    console.log(JSON.stringify({ event: "IGNORED_EDIT", update_id: body?.update_id }));
+    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "edited_post" }), { headers: { "Content-Type": "application/json" } });
   }
 
-  // ===== مدیر هشتگ: چت خصوصی ادمین (بدون چک سخت‌گیرانه chat.type) =====
-  if (c.admin && chatId === c.admin) {
-    // اگر از کانال مقصد اومده، رد کن (لوپ)
-    if (c.dest && chatId === c.dest) {
-      // نادیده بگیر
-    } else {
+  // اگر هیچ پیامی نبود
+  if (!msg) {
+    await saveLastWebhook(KV, body, "ignored", "no_message_in_body");
+    console.log(JSON.stringify({ event: "WEBHOOK_NO_MSG", keys: Object.keys(body || {}) }));
+    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "no_message" }), { headers: { "Content-Type": "application/json" } });
+  }
+
+  return await processMessage(KV, c, env, msg, body, false);
+}
+
+async function processMessage(KV, c, env, msg, body, isEdit) {
+  const chatId = String(msg.chat?.id || "");
+  const messageId = msg.message_id;
+
+  // چک ادمین
+  if (chatId === c.admin) {
+    if (!(c.dest && chatId === c.dest)) {
       const handled = await handleTagAdmin(env, KV, c, msg);
       if (handled) {
+        await saveLastWebhook(KV, body, "admin_handled", null);
         return new Response(JSON.stringify({ ok: true, admin: true }), { headers: { "Content-Type": "application/json" } });
       }
     }
   }
 
-  if (c.dest && String(msg.chat.id) === c.dest) {
+  // چک dest echo
+  if (c.dest && chatId === c.dest) {
+    await saveLastWebhook(KV, body, "ignored", "dest_echo");
+    console.log(JSON.stringify({ event: "IGNORED_DEST_ECHO", chatId: chatId }));
     return new Response(JSON.stringify({ ok: true, ignored: true, reason: "dest_echo" }), { headers: { "Content-Type": "application/json" } });
   }
 
-  if (!(await checkSource(KV, c, msg.chat.id))) {
-    console.log(JSON.stringify({ event: "SOURCE_REJECTED", chatId: String(msg.chat.id) }));
-    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "source" }), { headers: { "Content-Type": "application/json" } });
-  }
-
-  const s = await getSched(KV);
-  s.received += 1;
-  await saveSched(KV, s);
-
-  let resp;
-  if (msg.media_group_id) {
-    const album = await addToAlbum(KV, msg, c);
-    resp = { ok: true, queued: "album_collecting", items: album.items.length };
-    console.log(JSON.stringify({ event: "ALBUM_RECEIVED", mid: msg.message_id }));
-  } else {
-    const result = await enqueueSingle(KV, msg, c);
-    if (result.duplicated) resp = { ok: true, ignored: true, reason: "duplicate" };
-    else {
-      resp = { ok: true, queued: result.item.type };
-      console.log(JSON.stringify({ event: "MESSAGE_QUEUED", type: result.item.type, mid: msg.message_id }));
+  // چک منبع
+  if (c.source) {
+    const sourceMatches = chatId === c.source || chatId === "-100" + c.source || String(msg.chat?.id) === c.source;
+    if (!sourceMatches) {
+      await saveLastWebhook(KV, body, "ignored", "source_mismatch");
+      console.log(JSON.stringify({ event: "SOURCE_REJECTED", chatId: chatId, expected: c.source }));
+      return new Response(JSON.stringify({ ok: true, ignored: true, reason: "source_mismatch", received: chatId, expected: c.source }), { headers: { "Content-Type": "application/json" } });
     }
   }
-  return new Response(JSON.stringify(resp), { headers: { "Content-Type": "application/json" } });
+
+  // ساخت آیتم
+  const item = buildItemFromMessage(msg);
+
+  // افزودن به state با قفل
+  const result = await withState(KV, function (st) {
+    // چک تکراری (هش)
+    if (item.hash && st.hashes.includes(item.hash)) {
+      st.sched.ignored = (st.sched.ignored || 0) + 1;
+      st.sched.lastIgnoreReason = "duplicate_hash";
+      return { dup: true, reason: "duplicate_hash" };
+    }
+    // چک تکراری (ID)
+    if (st.items.some(function (x) { return x.id === item.id; })) {
+      st.sched.ignored = (st.sched.ignored || 0) + 1;
+      st.sched.lastIgnoreReason = "duplicate_id";
+      return { dup: true, reason: "duplicate_id" };
+    }
+    // آلبوم
+    if (msg.media_group_id) {
+      const mgid = String(msg.media_group_id);
+      const a = st.albums[mgid] || { id: "album-" + chatId + "-" + mgid, type: "album", sourceChatId: chatId, mediaGroupId: mgid, items: [], updatedAt: 0 };
+      if (!a.items.some(function (x) { return x.id === item.id; })) a.items.push(item);
+      a.updatedAt = Date.now();
+      st.albums[mgid] = a;
+    } else {
+      st.items.push(item);
+    }
+    // هش
+    if (item.hash) { st.hashes.push(item.hash); while (st.hashes.length > c.hashHistory) st.hashes.shift(); }
+    st.sched.received = (st.sched.received || 0) + 1;
+    return { ok: true, album: !!msg.media_group_id, queueLen: st.items.length };
+  });
+
+  await saveLastWebhook(KV, body, result.dup ? "duplicate" : "queued", result.dup ? result.reason : null);
+
+  if (result.dup) {
+    console.log(JSON.stringify({ event: "DUPLICATE", reason: result.reason, hash: item.hash, id: item.id }));
+    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "duplicate", detail: result.reason }), { headers: { "Content-Type": "application/json" } });
+  }
+
+  console.log(JSON.stringify({ event: result.album ? "ALBUM_QUEUED" : "MESSAGE_QUEUED", mid: messageId, type: item.type, queueLen: result.queueLen }));
+  return new Response(JSON.stringify({ ok: true, queued: result.album ? "album" : item.type, queueLen: result.queueLen }), { headers: { "Content-Type": "application/json" } });
 }
 
 /* ============================================================
-   PROCESS + RETRY + DLQ
+   CRON
 ============================================================ */
 function backoffSeconds(attempt, retryAfter) {
   if (retryAfter > 0) return Math.max(60, retryAfter);
@@ -804,121 +637,113 @@ function backoffSeconds(attempt, retryAfter) {
   return delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)];
 }
 
-async function processOne(env, kv, c) {
-  const queue = await listPrefix(kv, QP, 1000);
-  if (queue.length === 0) return { status: "empty" };
-  const now = Date.now();
-  const candidate = queue.find(({ item }) =>
-    item.state === "pending" || (item.state === "retry" && (item.retryAt || 0) <= now)
-  );
-  if (!candidate) return { status: "none_ready" };
-
-  const { key, item } = candidate;
-  item.state = "processing";
-  item.attempts += 1;
-  await kvPutJSON(kv, key, item, c.dlqTtl);
-
-  try {
-    if (item.type === "album") {
-      await sendAlbum(env, item);
-      if (c.deleteSource) for (const sub of item.items) await deleteSourceMessage(env, sub);
-    } else {
-      await sendSingle(env, item);
-      await deleteSourceMessage(env, item);
-    }
-    await kv.delete(key);
-    console.log(JSON.stringify({ event: "SEND_SUCCESS", id: item.id, type: item.type }));
-    return { status: "sent" };
-  } catch (e) {
-    item.lastError = e.message || String(e);
-    if (item.attempts >= c.maxRetries) {
-      await kvPutJSON(kv, DP + item.id, { ...item, failedAt: now }, c.dlqTtl);
-      await kv.delete(key);
-      console.log(JSON.stringify({ event: "MOVED_TO_DLQ", id: item.id, err: item.lastError }));
-      return { status: "dlq", error: item.lastError };
-    }
-    item.state = "retry";
-    item.retryAt = now + backoffSeconds(item.attempts, e.retryAfter || 0) * 1000;
-    await kvPutJSON(kv, key, item, c.dlqTtl);
-    console.log(JSON.stringify({ event: "RETRY_SCHEDULED", id: item.id, attempt: item.attempts }));
-    return { status: "retry", error: item.lastError };
-  }
-}
-
-/* ============================================================
-   CRON
-============================================================ */
 async function onCron(env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
 
-  try { await finalizeAlbums(KV, c); } catch (e) { console.log(JSON.stringify({ event: "ALBUM_FINALIZE_ERROR", err: e.message })); }
+  await migrate(KV);
 
-  const lockToken = await acquireLock(KV, c);
-  if (!lockToken) { console.log(JSON.stringify({ event: "CRON_SKIPPED_LOCKED" })); return; }
-
-  try {
-    const s = await getSched(KV);
-    const now = Date.now();
-
-    if (c.admin && now - (s.lastReportAt || 0) >= c.reportInt * 1000) {
-      const q = await listPrefix(KV, QP, 1000);
-      const d = await listPrefix(KV, DP, 100);
-      const txt = `📊 گزارش mynote_bot (V19.1)\n\n🕐 ${iso()}\n⏰ بازه: ${String(Math.floor(c.windowStart / 60)).padStart(2, "0")}:${String(c.windowStart % 60).padStart(2, "0")} تا ${String(Math.floor(c.windowEnd / 60)).padStart(2, "0")}:${String(c.windowEnd % 60).padStart(2, "0")}\n🧹 تمیزکاری: ${c.cleanCaptions ? "روشن" : "خاموش"}\n\n📥 دریافتی: ${s.received}\n📤 ارسال موفق: ${s.sent}\n🔁 Retry: ${s.retries}\n☠️ DLQ: ${d.length}\n❌ Failed: ${s.failed}\n📦 صف: ${q.length}\n⏭ ارسال بعدی: ${s.nextSendAt ? iso(s.nextSendAt) : "—"}\n\n${s.lastError ? "⚠️ خطا: " + s.lastError : "✅ بدون خطا"}`;
-      try {
-        await bale(env, "sendMessage", { chat_id: c.admin, text: txt });
-        s.lastReportAt = now;
-        await saveSched(KV, s);
-      } catch (e) { console.log(JSON.stringify({ event: "REPORT_ERROR", err: e.message })); }
-    }
-
-    if (!inWindow(c)) { console.log(JSON.stringify({ event: "OUTSIDE_WINDOW", mins: iranMinutes() })); return; }
-
-    const queue = await listPrefix(KV, QP, 1000);
-    if (queue.length === 0) { s.nextSendAt = 0; await saveSched(KV, s); return; }
-
-    if (!s.nextSendAt || s.nextSendAt <= 0) {
-      const delay = Math.floor(c.minDelay + Math.random() * (c.maxDelay - c.minDelay + 1));
-      s.nextSendAt = now + delay * 1000;
-      await saveSched(KV, s);
-      console.log(JSON.stringify({ event: "NEXT_SEND_SCHEDULED", delay }));
-      return;
-    }
-    if (now < s.nextSendAt) return;
-
-    const r = await processOne(env, KV, c);
-    if (r.status === "sent") {
-      s.sent += 1;
-      const delay = Math.floor(c.minDelay + Math.random() * (c.maxDelay - c.minDelay + 1));
-      s.nextSendAt = now + delay * 1000;
-      s.lastError = null;
-    } else if (r.status === "retry") {
-      s.retries += 1; s.lastError = r.error;
-    } else if (r.status === "dlq") {
-      s.failed += 1; s.lastError = r.error;
-      const delay = Math.floor(c.minDelay + Math.random() * (c.maxDelay - c.minDelay + 1));
-      s.nextSendAt = now + delay * 1000;
-    }
-    await saveSched(KV, s);
-  } finally {
-    await releaseLock(KV, lockToken);
+  // finalize آلبوم‌ها
+  const st0 = await readState(KV);
+  const now = Date.now();
+  const dueAlbums = Object.keys(st0.albums).filter(function (k) { return now - (st0.albums[k].updatedAt || 0) >= c.albumQuiet * 1000; });
+  if (dueAlbums.length > 0) {
+    await withState(KV, function (s) {
+      for (const k of dueAlbums) {
+        const a = s.albums[k];
+        if (a && a.items && a.items.length) {
+          s.items.push({ id: a.id, type: "album", sourceChatId: a.sourceChatId, mediaGroupId: a.mediaGroupId, items: a.items, createdAt: now, attempts: 0, state: "pending", retryAt: 0 });
+        }
+        delete s.albums[k];
+      }
+      return {};
+    });
   }
+
+  // گزارش ساعتی
+  const st1 = await readState(KV);
+  if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
+    const bank = await loadHashtagBank(KV);
+    const txt = "📊 گزارش mynote_bot (V25)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { /* ignore */ }
+    await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
+  }
+
+  if (!inWindow(c)) return;
+
+  const st2 = await readState(KV);
+  if (st2.items.length === 0) {
+    if (st2.sched.nextSendAt) await withState(KV, function (s) { s.sched.nextSendAt = 0; return {}; });
+    return;
+  }
+  if (!st2.sched.nextSendAt || st2.sched.nextSendAt <= 0) {
+    const delay = Math.floor(c.minDelay + Math.random() * (c.maxDelay - c.minDelay + 1));
+    await withState(KV, function (s) { s.sched.nextSendAt = now + delay * 1000; return {}; });
+    console.log(JSON.stringify({ event: "NEXT_SEND_SCHEDULED", delay: delay }));
+    return;
+  }
+  if (now < st2.sched.nextSendAt) return;
+
+  // انتخاب
+  const picked = await withState(KV, function (s) {
+    const idx = s.items.findIndex(function (it) { return it.state === "pending" || (it.state === "retry" && (it.retryAt || 0) <= now); });
+    if (idx === -1) return { item: null };
+    const item = s.items[idx];
+    s.items.splice(idx, 1);
+    const delay = Math.floor(c.minDelay + Math.random() * (c.maxDelay - c.minDelay + 1));
+    s.sched.nextSendAt = now + delay * 1000;
+    return { item: item };
+  });
+  if (!picked.item) return;
+  const item = picked.item;
+
+  let ok = false, errMsg = "", retryAfter = 0;
+  try {
+    if (item.type === "album") {
+      await sendAlbum(env, item);
+      if (c.deleteSource) { for (const sub of item.items) await deleteSourceMessage(env, sub); }
+    } else {
+      await sendSingle(env, item);
+      await deleteSourceMessage(env, item);
+    }
+    ok = true;
+    console.log(JSON.stringify({ event: "SEND_SUCCESS", id: item.id, type: item.type }));
+  } catch (e) { errMsg = e.message || String(e); retryAfter = e.retryAfter || 0; }
+
+  await withState(KV, function (s) {
+    if (ok) {
+      s.sched.sent = (s.sched.sent || 0) + 1;
+      s.sched.lastSendAt = now;
+      s.sched.lastError = null;
+    } else if ((item.attempts || 0) + 1 >= c.maxRetries) {
+      item.failedAt = now; item.lastError = errMsg;
+      s.dlq.push(item);
+      s.sched.failed = (s.sched.failed || 0) + 1;
+      s.sched.lastError = errMsg;
+    } else {
+      item.attempts = (item.attempts || 0) + 1;
+      item.state = "retry";
+      item.retryAt = now + backoffSeconds(item.attempts, retryAfter) * 1000;
+      item.lastError = errMsg;
+      s.items.push(item);
+      s.sched.retries = (s.sched.retries || 0) + 1;
+      s.sched.lastError = errMsg;
+    }
+    return {};
+  });
 }
 
 /* ============================================================
-   ADMIN HTTP
+   ADMIN endpoints
 ============================================================ */
 function isAdmin(req, env) {
   const key = env.ADMIN_KEY;
   if (!key) return false;
   const auth = req.headers.get("Authorization");
-  if (auth === `Bearer ${key}`) return true;
+  if (auth === "Bearer " + key) return true;
   return new URL(req.url).searchParams.get("key") === key;
 }
-
-function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
-}
+function json(obj, status) { return new Response(JSON.stringify(obj), { status: status || 200, headers: { "Content-Type": "application/json" } }); }
 
 export default {
   async fetch(request, env) {
@@ -928,136 +753,127 @@ export default {
     if (p === "/webhook" || p === "/telegram/webhook") {
       if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
       try { return await onWebhook(request, env); }
-      catch (e) { console.log(JSON.stringify({ event: "WEBHOOK_ERROR", err: e.message })); return json({ ok: false, error: e.message }, 500); }
+      catch (e) {
+        console.log(JSON.stringify({ event: "WEBHOOK_ERROR", err: e.message, stack: e.stack }));
+        return json({ ok: false, error: e.message }, 500);
+      }
     }
     if (p === "/health") return json({ ok: true, version: VERSION });
 
+    // 🎯 endpoint دیباگ: آخرین webhook دریافتی
+    if (p === "/admin/last-webhook") {
+      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      const last = await kvGetJSON(KV, LAST_WEBHOOK_KEY) || { at: 0, verdict: "never" };
+      return json({ ok: true, last: last });
+    }
+
     if (p === "/admin/status") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const c = cfg(env);
-      const s = await getSched(KV);
-      const q = await listPrefix(KV, QP, 1000);
-      const d = await listPrefix(KV, DP, 100);
-      const a = await listPrefix(KV, AP, 1000);
+      const st = await readState(KV);
       const bank = await loadHashtagBank(KV);
-      return json({ version: VERSION, config: { source: c.source, dest: c.dest, windowOn: c.windowOn, cleanCaptions: c.cleanCaptions, deleteSource: c.deleteSource }, scheduler: s, queue: q.length, albums: a.length, dlq: d.length, hashtagCount: Object.keys(bank.keywords).length, time: iso() });
+      const config = cfg(env);
+      return json({
+        version: VERSION,
+        config: { source: config.source, dest: config.dest, windowOn: config.windowOn, deleteSource: config.deleteSource, acceptEdits: config.acceptEdits },
+        scheduler: st.sched,
+        queue: st.items.length,
+        dlq: st.dlq.length,
+        albums: Object.keys(st.albums).length,
+        hashtagCount: Object.keys(bank.keywords).length,
+        time: iso()
+      });
     }
     if (p === "/admin/reset") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const s = await getSched(KV);
-      s.nextSendAt = 0; s.lastError = null;
-      await saveSched(KV, s);
+      await withState(KV, function (st) { st.sched.nextSendAt = 0; st.sched.lastError = null; return {}; });
       return json({ ok: true });
     }
     if (p === "/admin/requeue-dlq") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const c = cfg(env);
-      const list = await listPrefix(KV, DP, 1000);
-      let count = 0;
-      for (const { key, item } of list) {
-        item.state = "pending"; item.attempts = 0; item.retryAt = 0;
-        await kvPutJSON(KV, QP + item.createdAt + "-" + crypto.randomUUID().slice(0, 8), item, c.dlqTtl);
-        await KV.delete(key); count++;
-      }
-      return json({ ok: true, requeued: count });
+      const r = await withState(KV, function (st) {
+        const n = st.dlq.length;
+        for (const it of st.dlq) { it.state = "pending"; it.attempts = 0; it.retryAt = 0; st.items.push(it); }
+        st.dlq = [];
+        return { n: n };
+      });
+      return json({ ok: true, requeued: r.n });
     }
-
-    // ===== قوانین تمیزکاری (HTTP) =====
-    if (p === "/admin/cleaning-rules") {
+    if (p === "/admin/reset-hashes") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      return json({ ok: true, rules: await loadCleaningRules(KV) });
+      await withState(KV, function (st) { st.hashes = []; return {}; });
+      return json({ ok: true, message: "hash memory cleared" });
     }
-    if (p === "/admin/add-forbidden") {
+    if (p === "/admin/clear-queue") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const body = await request.json().catch(() => null);
-      const phrase = body?.phrase;
-      if (!phrase) return json({ ok: false, error: "phrase required" }, 400);
+      const r = await withState(KV, function (st) {
+        const n = st.items.length;
+        st.items = [];
+        return { n: n };
+      });
+      return json({ ok: true, cleared: r.n });
+    }
+    if (p === "/admin/cleaning-rules") { if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 }); return json({ ok: true, rules: await loadCleaningRules(KV) }); }
+    if (p === "/admin/add-forbidden" || p === "/admin/add-emoji" || p === "/admin/add-line" || p === "/admin/remove-forbidden") {
+      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      const url = new URL(request.url);
+      const body = await request.json().catch(function () { return null; });
       const rules = await loadCleaningRules(KV);
-      if (!rules.forbidden_phrases.includes(phrase)) rules.forbidden_phrases.push(phrase);
-      await kvPutJSON(KV, "mynote:cleaning_rules", rules, 2592000);
-      return json({ ok: true, rules });
-    }
-    if (p === "/admin/remove-forbidden") {
-      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const body = await request.json().catch(() => null);
-      const rules = await loadCleaningRules(KV);
-      rules.forbidden_phrases = (rules.forbidden_phrases || []).filter(x => x !== body?.phrase);
-      await kvPutJSON(KV, "mynote:cleaning_rules", rules, 2592000);
-      return json({ ok: true, rules });
-    }
-    if (p === "/admin/add-emoji") {
-      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const body = await request.json().catch(() => null);
-      const emoji = body?.emoji;
-      if (!emoji) return json({ ok: false, error: "emoji required" }, 400);
-      const rules = await loadCleaningRules(KV);
-      if (!rules.remove_emojis.includes(emoji)) rules.remove_emojis.push(emoji);
-      await kvPutJSON(KV, "mynote:cleaning_rules", rules, 2592000);
-      return json({ ok: true, rules });
-    }
-    if (p === "/admin/add-line") {
-      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const body = await request.json().catch(() => null);
-      const pattern = body?.pattern;
-      if (!pattern) return json({ ok: false, error: "pattern required" }, 400);
-      const rules = await loadCleaningRules(KV);
-      if (!rules.remove_lines.includes(pattern)) rules.remove_lines.push(pattern);
-      await kvPutJSON(KV, "mynote:cleaning_rules", rules, 2592000);
-      return json({ ok: true, rules });
+      const val = (body && (body.phrase || body.emoji || body.pattern)) || url.searchParams.get("phrase") || url.searchParams.get("emoji") || url.searchParams.get("pattern");
+      if (!val) return json({ ok: false, error: "value required" }, 400);
+      if (p === "/admin/add-forbidden") { if (!rules.forbidden_phrases.includes(val)) rules.forbidden_phrases.push(val); }
+      if (p === "/admin/add-emoji") { if (!rules.remove_emojis.includes(val)) rules.remove_emojis.push(val); }
+      if (p === "/admin/add-line") { if (!rules.remove_lines.includes(val)) rules.remove_lines.push(val); }
+      if (p === "/admin/remove-forbidden") { rules.forbidden_phrases = (rules.forbidden_phrases || []).filter(function (x) { return x !== val; }); }
+      await kvPutJSON(KV, CLEAN_RULES_KEY, rules, 2592000);
+      return json({ ok: true, rules: rules });
     }
     if (p === "/admin/reset-cleaning-rules") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      await kvPutJSON(KV, "mynote:cleaning_rules", { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] }, 2592000);
-      return json({ ok: true, message: "rules reset" });
+      await kvPutJSON(KV, CLEAN_RULES_KEY, { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] }, 2592000);
+      return json({ ok: true });
     }
-
-    // ===== مدیریت بانک هشتگ (HTTP) =====
-    if (p === "/admin/tags") {
+    if (p === "/admin/tags") { if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 }); return json({ ok: true, bank: await loadHashtagBank(KV) }); }
+    if (p === "/admin/purge-source") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      return json({ ok: true, bank: await loadHashtagBank(KV) });
+      const url = new URL(request.url);
+      const c = cfg(env);
+      const from = Math.max(1, parseInt(url.searchParams.get("from") || "1", 10));
+      const span = Math.min(200, Math.max(1, parseInt(url.searchParams.get("span") || "100", 10)));
+      const to = from + span - 1;
+      let deleted = 0, failed = 0;
+      for (let start = from; start <= to; start += 5) {
+        const batch = [];
+        for (let mid = start; mid <= Math.min(to, start + 4); mid++) batch.push(mid);
+        const results = await Promise.all(batch.map(function (mid) {
+          return bale(env, "deleteMessage", { chat_id: c.source, message_id: mid }).then(function () { return 1; }).catch(function () { return 0; });
+        }));
+        for (const r of results) { if (r === 1) deleted++; else failed++; }
+      }
+      return json({ ok: true, from: from, to: to, deleted: deleted, failed: failed, next_from: to + 1 });
     }
-
-    // ===== مدیریت وب‌هوک =====
     if (p === "/admin/set-webhook") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
       const webhookUrl = "https://mynote-worker.metabolicbit.workers.dev/webhook";
       try {
-        const res = await fetch(BALE_BASE + token + "/setWebhook", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url: webhookUrl,
-            allowed_updates: ["message", "channel_post", "edited_channel_post"],
-            drop_pending_updates: false
-          })
-        });
+        const payload = { url: webhookUrl, allowed_updates: ["message", "channel_post"], drop_pending_updates: false };
+        if (env.BALE_WEBHOOK_SECRET) payload.secret_token = env.BALE_WEBHOOK_SECRET;
+        const res = await fetch(BALE_BASE + token + "/setWebhook", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
         return json({ ok: true, webhook: webhookUrl, result: data });
-      } catch (e) {
-        return json({ ok: false, error: e.message }, 500);
-      }
+      } catch (e) { return json({ ok: false, error: e.message }, 500); }
     }
-    
     if (p === "/admin/webhook-info") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
       try {
         const res = await fetch(BALE_BASE + token + "/getWebhookInfo");
-        const data = await res.json();
-        return json({ ok: true, info: data });
-      } catch (e) {
-        return json({ ok: false, error: e.message }, 500);
-      }
+        return json({ ok: true, info: await res.json() });
+      } catch (e) { return json({ ok: false, error: e.message }, 500); }
     }
-
-    if (p === "/") {
-      const s = KV ? await getSched(KV) : {};
-      return json({ ok: true, service: "mynote_bot", version: VERSION, stats: s });
-    }
+    if (p === "/") { const st = KV ? await readState(KV) : {}; return json({ ok: true, service: "mynote_bot", version: VERSION, stats: st.sched }); }
     return new Response("Not Found", { status: 404 });
   },
-
   async scheduled(controller, env) {
     try { await onCron(env); }
     catch (e) { console.log(JSON.stringify({ event: "CRON_FATAL", err: e.message, stack: e.stack })); }
