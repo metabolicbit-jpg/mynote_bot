@@ -1,10 +1,8 @@
-/* mynote_bot V25 DEBUG - state single + last-webhook logger */
-const VERSION = "V25-DEBUG-2026-08-24";
+const VERSION = "V26-FINAL-2026-08-24";
 const BALE_BASE = "https://tapi.bale.ai/bot";
-const STATE_KEY = "mynote:state25";
-const QLOCK_KEY = "mynote:qlock25";
-const MIG_KEY = "mynote:migrated25";
-const LAST_WEBHOOK_KEY = "mynote:last_webhook";
+const STATE_KEY = "mynote:state26";
+const QLOCK_KEY = "mynote:qlock26";
+const MIG_KEY = "mynote:migrated26";
 const HASHTAG_BANK_KEY = "mynote:hashtag_bank";
 const TAG_STATE_PREFIX = "mynote:tag_state:";
 const CLEAN_RULES_KEY = "mynote:cleaning_rules";
@@ -57,26 +55,15 @@ function cfg(env) {
     maxDelay: Math.max(60, n("MAX_DELAY_SEC", DEFAULTS.MAX_DELAY_SEC)),
     albumQuiet: Math.max(15, n("ALBUM_QUIET_SEC", DEFAULTS.ALBUM_QUIET_SEC)),
     reportInt: Math.max(3600, n("REPORT_INTERVAL_SEC", DEFAULTS.REPORT_INTERVAL_SEC)),
-    dlqTtl: Math.max(60, n("DLQ_TTL_SEC", DEFAULTS.DLQ_TTL_SEC)),
     maxRetries: Math.max(1, n("MAX_RETRIES", DEFAULTS.MAX_RETRIES)),
     hashHistory: Math.max(100, n("HASH_HISTORY", DEFAULTS.HASH_HISTORY))
   };
 }
-function iranMinutes() {
-  const d = new Date(Date.now() + 3.5 * 3600 * 1000);
-  return d.getUTCHours() * 60 + d.getUTCMinutes();
-}
-function inWindow(c) {
-  if (!c.windowOn) return true;
-  const m = iranMinutes();
-  return m >= c.windowStart && m <= c.windowEnd;
-}
+function iranMinutes() { const d = new Date(Date.now() + 3.5 * 3600 * 1000); return d.getUTCHours() * 60 + d.getUTCMinutes(); }
+function inWindow(c) { if (!c.windowOn) return true; const m = iranMinutes(); return m >= c.windowStart && m <= c.windowEnd; }
 function iso(ms) { return new Date(ms || Date.now()).toISOString(); }
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-function normalizeText(t) {
-  return (t || "").replace(/\u0640+/g, "").replace(/ك/g, "ک")
-    .replace(/ي/g, "ی").replace(/\s+/g, " ").trim();
-}
+function normalizeText(t) { return (t || "").replace(/\u0640+/g, "").replace(/ك/g, "ک").replace(/ي/g, "ی").replace(/\s+/g, " ").trim(); }
 
 function cleanText(text, entities) {
   if (!text) return "";
@@ -85,24 +72,16 @@ function cleanText(text, entities) {
     const sorted = [...entities].sort((a, b) => (b.offset || 0) - (a.offset || 0));
     for (const ent of sorted) {
       if (!ent || ent.offset == null || ent.length == null) continue;
-      if (["text_link", "url", "mention"].includes(ent.type))
-        t = t.substring(0, ent.offset) + t.substring(ent.offset + ent.length);
+      if (["text_link", "url", "mention"].includes(ent.type)) t = t.substring(0, ent.offset) + t.substring(ent.offset + ent.length);
     }
   }
   const lines = t.split("\n").map(function (line) {
     let l = line;
-    l = l.replace(/\u0640+/g, "");
-    l = l.replace(/\[[^\]]*\]\([^)]*\)?/g, "");
-    l = l.replace(/https?:\/\/[^\s]+/g, "");
-    l = l.replace(/ble\.ir\/[^\s]*/g, "");
-    l = l.replace(/t\.me\/[^\s]*/g, "");
-    l = l.replace(/@[a-zA-Z0-9_]+/g, "");
-    l = l.replace(/#[^\s]+/g, "");
-    l = l.replace(/[\*]+/g, "");
-    l = l.replace(/\uFFFD/g, "");
-    l = l.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "");
-    l = l.replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
-    l = l.replace(/[\u200B\u200D\uFE0F]/g, "");
+    l = l.replace(/\u0640+/g, "").replace(/\[[^\]]*\]\([^)]*\)?/g, "");
+    l = l.replace(/https?:\/\/[^\s]+/g, "").replace(/ble\.ir\/[^\s]*/g, "").replace(/t\.me\/[^\s]*/g, "");
+    l = l.replace(/@[a-zA-Z0-9_]+/g, "").replace(/#[^\s]+/g, "").replace(/[\*]+/g, "");
+    l = l.replace(/\uFFFD/g, "").replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "");
+    l = l.replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "").replace(/[\u200B\u200D\uFE0F]/g, "");
     const n = l.trim();
     if (!n || /^[\s\u200C]*$/.test(n)) return "";
     if (!/[\p{L}\p{N}]/u.test(n) && /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(n)) return "";
@@ -186,6 +165,7 @@ function extractFileId(msg, type) {
   return null;
 }
 
+/* 🎯 kvPutJSON با مدیریت silent quota error */
 async function kvGetJSON(kv, key) {
   try { return await kv.get(key, { type: "json", cacheTtl: 30 }); }
   catch (e) { throw e; }
@@ -194,9 +174,15 @@ async function kvPutJSON(kv, key, value, ttl) {
   try {
     const opts = ttl ? { expirationTtl: Math.max(60, Math.floor(ttl)) } : {};
     await kv.put(key, JSON.stringify(value), opts);
+    return true;
   } catch (e) {
-    console.log(JSON.stringify({ event: "KV_PUT_ERROR", key: key, err: e.message }));
-    throw e;
+    const msg = String(e && e.message || "");
+    if (msg.includes("limit exceeded")) {
+      console.log(JSON.stringify({ event: "KV_QUOTA_EXCEEDED", key: key }));
+      return false; /* silent fail */
+    }
+    console.log(JSON.stringify({ event: "KV_PUT_ERROR", key: key, err: msg }));
+    return false;
   }
 }
 async function kvDeleteSafe(kv, key) { try { await kv.delete(key); } catch (e) { } }
@@ -258,13 +244,16 @@ async function migrate(kv) {
     const oldHashes = (await kvGetJSON(kv, "mynote:hashes")) || [];
     const oldSched = (await kvGetJSON(kv, "mynote:sched")) || null;
     const oldState24 = (await kvGetJSON(kv, "mynote:state24")) || null;
+    const oldState25 = (await kvGetJSON(kv, "mynote:state25")) || null;
     await withState(kv, function (st) {
-      if (oldState24) {
-        for (const it of (oldState24.items || [])) { if (!st.items.some(function (x) { return x.id === it.id; })) st.items.push(it); }
-        for (const it of (oldState24.dlq || [])) st.dlq.push(it);
-        for (const h of (oldState24.hashes || [])) { if (!st.hashes.includes(h)) st.hashes.push(h); }
-        Object.assign(st.albums, oldState24.albums || {});
-        if (oldState24.sched) Object.assign(st.sched, oldState24.sched);
+      const sources = [oldState24, oldState25];
+      for (const src of sources) {
+        if (!src) continue;
+        for (const it of (src.items || [])) { if (!st.items.some(function (x) { return x.id === it.id; })) st.items.push(it); }
+        for (const it of (src.dlq || [])) st.dlq.push(it);
+        for (const h of (src.hashes || [])) { if (!st.hashes.includes(h)) st.hashes.push(h); }
+        Object.assign(st.albums, src.albums || {});
+        if (src.sched) Object.assign(st.sched, src.sched);
       }
       for (const it of oldQueue) { if (!st.items.some(function (x) { return x.id === it.id; })) st.items.push(it); }
       for (const it of oldDlq) st.dlq.push(it);
@@ -283,7 +272,9 @@ async function migrate(kv) {
     await kvDeleteSafe(kv, "mynote:albums");
     await kvDeleteSafe(kv, "mynote:sched");
     await kvDeleteSafe(kv, "mynote:state24");
-    console.log(JSON.stringify({ event: "MIGRATED" }));
+    await kvDeleteSafe(kv, "mynote:state25");
+    await kvDeleteSafe(kv, "mynote:last_webhook");
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V26" }));
   } catch (e) {
     console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message }));
   }
@@ -313,13 +304,22 @@ async function makeCaption(env, kv, item) {
   }
   return caption;
 }
+
+/* 🎯 sendSingle با fallback به sendDocument برای عکس */
 async function sendSingle(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
   const caption = await makeCaption(env, kv, item);
+  if (item.type === "photo") {
+    try {
+      return await bale(env, "sendPhoto", { chat_id: c.dest, photo: item.fileId, caption: caption || undefined });
+    } catch (photoErr) {
+      console.log(JSON.stringify({ event: "PHOTO_FAILED_TRYING_DOCUMENT", id: item.id, err: photoErr.message }));
+      return await bale(env, "sendDocument", { chat_id: c.dest, document: item.fileId, caption: caption || undefined });
+    }
+  }
   let method, payload;
   switch (item.type) {
-    case "photo": method = "sendPhoto"; payload = { chat_id: c.dest, photo: item.fileId, caption: caption || undefined }; break;
     case "video": method = "sendVideo"; payload = { chat_id: c.dest, video: item.fileId, caption: caption || undefined }; break;
     case "document": method = "sendDocument"; payload = { chat_id: c.dest, document: item.fileId, caption: caption || undefined }; break;
     case "audio": method = "sendAudio"; payload = { chat_id: c.dest, audio: item.fileId, caption: caption || undefined }; break;
@@ -454,23 +454,6 @@ async function handleTagAdmin(env, kv, c, msg) {
   return false;
 }
 
-async function saveLastWebhook(kv, body, verdict, reason) {
-  try {
-    await kvPutJSON(kv, LAST_WEBHOOK_KEY, {
-      at: Date.now(), verdict: verdict, reason: reason,
-      update_id: body ? body.update_id : null,
-      has_channel_post: !!(body && body.channel_post),
-      has_message: !!(body && body.message),
-      has_edited_channel_post: !!(body && body.edited_channel_post),
-      keys: body ? Object.keys(body) : [],
-      channel_post_chat_id: body && body.channel_post && body.channel_post.chat ? body.channel_post.chat.id : null,
-      channel_post_message_id: body && body.channel_post ? body.channel_post.message_id : null,
-      channel_post_media_group_id: body && body.channel_post ? body.channel_post.media_group_id : null,
-      channel_post_caption_preview: body && body.channel_post ? (body.channel_post.caption || body.channel_post.text || "").substring(0, 100) : null
-    }, 3600);
-  } catch (e) { }
-}
-
 async function onWebhook(request, env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
@@ -484,15 +467,9 @@ async function onWebhook(request, env) {
   const msg = body ? (body.channel_post || body.message) : null;
   if (!msg && body && body.edited_channel_post) {
     if (c.acceptEdits) return await processMessage(KV, c, env, body.edited_channel_post, body, true);
-    await saveLastWebhook(KV, body, "ignored", "edited_post_not_accepted");
-    console.log(JSON.stringify({ event: "IGNORED_EDIT" }));
     return new Response(JSON.stringify({ ok: true, ignored: true, reason: "edited_post" }), { headers: { "Content-Type": "application/json" } });
   }
-  if (!msg) {
-    await saveLastWebhook(KV, body, "ignored", "no_message_in_body");
-    console.log(JSON.stringify({ event: "WEBHOOK_NO_MSG", keys: body ? Object.keys(body) : [] }));
-    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "no_message" }), { headers: { "Content-Type": "application/json" } });
-  }
+  if (!msg) return new Response(JSON.stringify({ ok: true, ignored: true }), { headers: { "Content-Type": "application/json" } });
   return await processMessage(KV, c, env, msg, body, false);
 }
 
@@ -502,23 +479,17 @@ async function processMessage(KV, c, env, msg, body, isEdit) {
   if (chatId === c.admin) {
     if (!(c.dest && chatId === c.dest)) {
       const handled = await handleTagAdmin(env, KV, c, msg);
-      if (handled) {
-        await saveLastWebhook(KV, body, "admin_handled", null);
-        return new Response(JSON.stringify({ ok: true, admin: true }), { headers: { "Content-Type": "application/json" } });
-      }
+      if (handled) return new Response(JSON.stringify({ ok: true, admin: true }), { headers: { "Content-Type": "application/json" } });
     }
   }
   if (c.dest && chatId === c.dest) {
-    await saveLastWebhook(KV, body, "ignored", "dest_echo");
-    console.log(JSON.stringify({ event: "IGNORED_DEST_ECHO", chatId: chatId }));
     return new Response(JSON.stringify({ ok: true, ignored: true, reason: "dest_echo" }), { headers: { "Content-Type": "application/json" } });
   }
   if (c.source) {
     const sourceMatches = chatId === c.source || chatId === "-100" + c.source;
     if (!sourceMatches) {
-      await saveLastWebhook(KV, body, "ignored", "source_mismatch");
       console.log(JSON.stringify({ event: "SOURCE_REJECTED", chatId: chatId, expected: c.source }));
-      return new Response(JSON.stringify({ ok: true, ignored: true, reason: "source_mismatch", received: chatId, expected: c.source }), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ ok: true, ignored: true, reason: "source_mismatch" }), { headers: { "Content-Type": "application/json" } });
     }
   }
   const item = buildItemFromMessage(msg);
@@ -546,10 +517,9 @@ async function processMessage(KV, c, env, msg, body, isEdit) {
     st.sched.received = (st.sched.received || 0) + 1;
     return { ok: true, album: !!msg.media_group_id, queueLen: st.items.length };
   });
-  await saveLastWebhook(KV, body, result.dup ? "duplicate" : "queued", result.dup ? result.reason : null);
   if (result.dup) {
     console.log(JSON.stringify({ event: "DUPLICATE", reason: result.reason, id: item.id }));
-    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "duplicate", detail: result.reason }), { headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "duplicate" }), { headers: { "Content-Type": "application/json" } });
   }
   console.log(JSON.stringify({ event: result.album ? "ALBUM_QUEUED" : "MESSAGE_QUEUED", mid: messageId, type: item.type, queueLen: result.queueLen }));
   return new Response(JSON.stringify({ ok: true, queued: result.album ? "album" : item.type, queueLen: result.queueLen }), { headers: { "Content-Type": "application/json" } });
@@ -583,7 +553,7 @@ async function onCron(env) {
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V25)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V26)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
@@ -596,7 +566,6 @@ async function onCron(env) {
   if (!st2.sched.nextSendAt || st2.sched.nextSendAt <= 0) {
     const delay = Math.floor(c.minDelay + Math.random() * (c.maxDelay - c.minDelay + 1));
     await withState(KV, function (s) { s.sched.nextSendAt = now + delay * 1000; return {}; });
-    console.log(JSON.stringify({ event: "NEXT_SEND_SCHEDULED", delay: delay }));
     return;
   }
   if (now < st2.sched.nextSendAt) return;
@@ -668,11 +637,6 @@ export default {
       }
     }
     if (p === "/health") return json({ ok: true, version: VERSION });
-    if (p === "/admin/last-webhook") {
-      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const last = await kvGetJSON(KV, LAST_WEBHOOK_KEY) || { at: 0, verdict: "never" };
-      return json({ ok: true, last: last });
-    }
     if (p === "/admin/status") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       const st = await readState(KV);
@@ -726,24 +690,6 @@ export default {
       return json({ ok: true });
     }
     if (p === "/admin/tags") { if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 }); return json({ ok: true, bank: await loadHashtagBank(KV) }); }
-    if (p === "/admin/get-updates") {
-      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
-      try {
-        const res = await fetch(BALE_BASE + token + "/getUpdates?limit=10&timeout=0");
-        const data = await res.json();
-        return json({ ok: true, updates: data });
-      } catch (e) { return json({ ok: false, error: e.message }, 500); }
-    }
-    if (p === "/admin/test-direct") {
-      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
-      const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
-      try {
-        const res = await fetch(BALE_BASE + token + "/getMe");
-        const data = await res.json();
-        return json({ ok: true, me: data });
-      } catch (e) { return json({ ok: false, error: e.message }, 500); }
-    }
     if (p === "/admin/purge-source") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       const url = new URL(request.url);
@@ -780,6 +726,15 @@ export default {
       try {
         const res = await fetch(BALE_BASE + token + "/getWebhookInfo");
         return json({ ok: true, info: await res.json() });
+      } catch (e) { return json({ ok: false, error: e.message }, 500); }
+    }
+    if (p === "/admin/get-updates") {
+      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
+      try {
+        const res = await fetch(BALE_BASE + token + "/getUpdates?limit=10&timeout=0");
+        const data = await res.json();
+        return json({ ok: true, updates: data });
       } catch (e) { return json({ ok: false, error: e.message }, 500); }
     }
     if (p === "/") { const st = KV ? await readState(KV) : {}; return json({ ok: true, service: "mynote_bot", version: VERSION, stats: st.sched }); }
