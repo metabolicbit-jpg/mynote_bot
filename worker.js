@@ -1,4 +1,4 @@
-const VERSION = "V28-REUPLOAD-2026-08-26";
+const VERSION = "V29-FREE-2026-08-27";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 const BALE_FILE_BASE = "https://tapi.bale.ai/file";
 const STATE_KEY = "mynote:state26";
@@ -11,7 +11,7 @@ const CLEAN_RULES_KEY = "mynote:cleaning_rules";
 const DEFAULTS = {
   MIN_DELAY_SEC: 180, MAX_DELAY_SEC: 600,
   WINDOW_START_MIN: 510, WINDOW_END_MIN: 1350,
-  ALBUM_QUIET_SEC: 20, REPORT_INTERVAL_SEC: 3600,
+  ALBUM_QUIET_SEC: 20, REPORT_INTERVAL_SEC: 10800,
   DLQ_TTL_SEC: 2592000, MAX_RETRIES: 5, HASH_HISTORY: 2000
 };
 
@@ -214,7 +214,6 @@ async function bale(env, method, payload) {
   return data.result;
 }
 
-/* 🎯 دانلود و آپلود مجدد فایل (V28) */
 async function downloadFileBuffer(env, fileId) {
   const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
   const fileInfo = await bale(env, "getFile", { file_id: fileId });
@@ -332,21 +331,31 @@ function emptyState() {
 }
 async function readState(kv) { return (await kvGetJSON(kv, STATE_KEY)) || emptyState(); }
 
+/* 🎯 V29: tryLock silent + NOLOCK token (برای جلوگیری از 500 در quota exceeded) */
 async function tryLock(kv, key, tries, waitMs) {
   for (let i = 0; i < tries; i++) {
-    const existing = await kv.get(key);
-    if (!existing) {
-      const token = crypto.randomUUID();
-      await kv.put(key, token, { expirationTtl: 60 });
-      const conf = await kv.get(key);
-      if (conf === token) return token;
+    try {
+      const existing = await kv.get(key);
+      if (!existing) {
+        const token = crypto.randomUUID();
+        await kv.put(key, token, { expirationTtl: 60 });
+        const conf = await kv.get(key);
+        if (conf === token) return token;
+      }
+    } catch (e) {
+      const msg = String(e && e.message || "");
+      if (msg.includes("limit exceeded")) {
+        console.log(JSON.stringify({ event: "LOCK_QUOTA_SKIP" }));
+        return "NOLOCK";
+      }
     }
     if (i < tries - 1) await sleep(waitMs);
   }
   return null;
 }
+/* 🎯 V29: unlock با پشتیبانی از NOLOCK */
 async function unlock(kv, key, token) {
-  if (!token) return;
+  if (!token || token === "NOLOCK") return;
   if ((await kv.get(key)) === token) await kvDeleteSafe(kv, key);
 }
 async function withState(kv, mutate) {
@@ -400,7 +409,7 @@ async function migrate(kv) {
     await kvDeleteSafe(kv, "mynote:state24");
     await kvDeleteSafe(kv, "mynote:state25");
     await kvDeleteSafe(kv, "mynote:last_webhook");
-    console.log(JSON.stringify({ event: "MIGRATED_TO_V28" }));
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V29" }));
   } catch (e) {
     console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message }));
   }
@@ -433,7 +442,6 @@ async function makeCaption(env, kv, item) {
   return caption;
 }
 
-/* 🎯 sendSingle با smart fallback (V28) */
 async function sendSingle(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
@@ -522,7 +530,7 @@ async function handleTagAdmin(env, kv, c, msg) {
   if (text === "/status" || text === "/admin") {
     const st = await readState(kv);
     const bank = await loadHashtagBank(kv);
-    const txt = "📊 وضعیت بات (V28)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
+    const txt = "📊 وضعیت بات (V29)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
     await adminSay(env, chatId, txt, MENUS.home.rows);
     return true;
   }
@@ -662,6 +670,7 @@ function backoffSeconds(attempt, retryAfter) {
   return delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)];
 }
 
+/* 🎯 V29: گزارش فقط در بازه ۸:۳۰-۲۲:۳۰ + فاصله ۳ ساعت */
 async function onCron(env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
@@ -681,14 +690,24 @@ async function onCron(env) {
       return {};
     });
   }
+
+  /* 🎯 V29: خارج از بازه ۸:۳۰-۲۲:۳۰ → فقط cron را اجرا کن، گزارش نده و ارسال نکن */
+  if (!inWindow(c)) {
+    /* ریست nextSendAt اگر چیزی مانده باشد تا اول صبح دوباره زمان‌بندی شود */
+    const stW = await readState(KV);
+    if (stW.sched.nextSendAt) await withState(KV, function (s) { s.sched.nextSendAt = 0; return {}; });
+    return;
+  }
+
+  /* 🎯 V29: گزارش ۳ ساعته فقط داخل window */
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V28)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V29)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
-  if (!inWindow(c)) return;
+
   const st2 = await readState(KV);
   if (st2.items.length === 0) {
     if (st2.sched.nextSendAt) await withState(KV, function (s) { s.sched.nextSendAt = 0; return {}; });
