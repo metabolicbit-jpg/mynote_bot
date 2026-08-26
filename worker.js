@@ -1,5 +1,6 @@
-const VERSION = "V27-CHAT-STATUS-2026-08-26";
+const VERSION = "V28-REUPLOAD-2026-08-26";
 const BALE_BASE = "https://tapi.bale.ai/bot";
+const BALE_FILE_BASE = "https://tapi.bale.ai/file";
 const STATE_KEY = "mynote:state26";
 const QLOCK_KEY = "mynote:qlock26";
 const MIG_KEY = "mynote:migrated26";
@@ -164,6 +165,22 @@ function extractFileId(msg, type) {
   if (type === "sticker") return msg.sticker.file_id;
   return null;
 }
+function extractFileName(msg, type) {
+  if (type === "video") return msg.video.file_name;
+  if (type === "document") return msg.document.file_name;
+  if (type === "audio") return msg.audio.file_name || msg.audio.title;
+  if (type === "animation") return msg.animation.file_name;
+  return null;
+}
+function extractMimeType(msg, type) {
+  if (type === "video") return msg.video.mime_type;
+  if (type === "document") return msg.document.mime_type;
+  if (type === "audio") return msg.audio.mime_type;
+  if (type === "voice") return msg.voice.mime_type;
+  if (type === "animation") return msg.animation.mime_type;
+  if (type === "sticker") return "image/webp";
+  return null;
+}
 
 async function kvGetJSON(kv, key) {
   try { return await kv.get(key, { type: "json", cacheTtl: 30 }); }
@@ -195,6 +212,119 @@ async function bale(env, method, payload) {
     throw e;
   }
   return data.result;
+}
+
+/* 🎯 دانلود و آپلود مجدد فایل (V28) */
+async function downloadFileBuffer(env, fileId) {
+  const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
+  const fileInfo = await bale(env, "getFile", { file_id: fileId });
+  if (!fileInfo || !fileInfo.file_path) throw new Error("getFile returned no path");
+  const res = await fetch(BALE_FILE_BASE + "/bot" + token + "/" + fileInfo.file_path);
+  if (!res.ok) throw new Error("Download failed: " + res.status);
+  return { buffer: await res.arrayBuffer(), fileName: fileInfo.file_path.split("/").pop() };
+}
+
+async function sendWithUpload(env, method, field, dest, fileId, caption, fileName, mimeType) {
+  const { buffer } = await downloadFileBuffer(env, fileId);
+  const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
+  const form = new FormData();
+  form.append("chat_id", dest);
+  const blob = new Blob([buffer], { type: mimeType || "application/octet-stream" });
+  form.append(field, blob, fileName || "file");
+  if (caption) form.append("caption", caption);
+  const res = await fetch(BALE_BASE + token + "/" + method, { method: "POST", body: form });
+  const data = await res.json().catch(function () { return null; });
+  if (!res.ok || !data || data.ok !== true) {
+    throw new Error("Upload " + method + ": " + ((data && data.description) || res.status));
+  }
+  return data.result;
+}
+
+async function sendPhotoSmart(env, dest, fileId, caption) {
+  try {
+    return await bale(env, "sendPhoto", { chat_id: dest, photo: fileId, caption: caption || undefined });
+  } catch (e) {
+    const msg = String(e.message || "");
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+      console.log(JSON.stringify({ event: "PHOTO_FALLBACK_UPLOAD", fileId: fileId, err: msg }));
+      return await sendWithUpload(env, "sendPhoto", "photo", dest, fileId, caption, "photo.jpg", "image/jpeg");
+    }
+    throw e;
+  }
+}
+
+async function sendVideoSmart(env, dest, fileId, caption, fileName) {
+  try {
+    return await bale(env, "sendVideo", { chat_id: dest, video: fileId, caption: caption || undefined });
+  } catch (e) {
+    const msg = String(e.message || "");
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+      console.log(JSON.stringify({ event: "VIDEO_FALLBACK_UPLOAD", fileId: fileId }));
+      return await sendWithUpload(env, "sendVideo", "video", dest, fileId, caption, fileName || "video.mp4", "video/mp4");
+    }
+    throw e;
+  }
+}
+
+async function sendDocumentSmart(env, dest, fileId, caption, fileName, mimeType) {
+  try {
+    return await bale(env, "sendDocument", { chat_id: dest, document: fileId, caption: caption || undefined });
+  } catch (e) {
+    const msg = String(e.message || "");
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+      console.log(JSON.stringify({ event: "DOC_FALLBACK_UPLOAD", fileId: fileId }));
+      return await sendWithUpload(env, "sendDocument", "document", dest, fileId, caption, fileName || "file", mimeType || "application/octet-stream");
+    }
+    throw e;
+  }
+}
+
+async function sendAudioSmart(env, dest, fileId, caption, fileName) {
+  try {
+    return await bale(env, "sendAudio", { chat_id: dest, audio: fileId, caption: caption || undefined });
+  } catch (e) {
+    const msg = String(e.message || "");
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+      return await sendWithUpload(env, "sendAudio", "audio", dest, fileId, caption, fileName || "audio.mp3", "audio/mpeg");
+    }
+    throw e;
+  }
+}
+
+async function sendVoiceSmart(env, dest, fileId, caption) {
+  try {
+    return await bale(env, "sendVoice", { chat_id: dest, voice: fileId, caption: caption || undefined });
+  } catch (e) {
+    const msg = String(e.message || "");
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+      return await sendWithUpload(env, "sendVoice", "voice", dest, fileId, caption, "voice.ogg", "audio/ogg");
+    }
+    throw e;
+  }
+}
+
+async function sendAnimationSmart(env, dest, fileId, caption) {
+  try {
+    return await bale(env, "sendAnimation", { chat_id: dest, animation: fileId, caption: caption || undefined });
+  } catch (e) {
+    const msg = String(e.message || "");
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+      return await sendWithUpload(env, "sendAnimation", "animation", dest, fileId, caption, "animation.mp4", "video/mp4");
+    }
+    throw e;
+  }
+}
+
+async function sendStickerSmart(env, dest, fileId) {
+  try {
+    return await bale(env, "sendSticker", { chat_id: dest, sticker: fileId });
+  } catch (e) {
+    const msg = String(e.message || "");
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+      return await sendWithUpload(env, "sendSticker", "sticker", dest, fileId, null, "sticker.webp", "image/webp");
+    }
+    throw e;
+  }
 }
 
 function emptyState() {
@@ -270,7 +400,7 @@ async function migrate(kv) {
     await kvDeleteSafe(kv, "mynote:state24");
     await kvDeleteSafe(kv, "mynote:state25");
     await kvDeleteSafe(kv, "mynote:last_webhook");
-    console.log(JSON.stringify({ event: "MIGRATED_TO_V27" }));
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V28" }));
   } catch (e) {
     console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message }));
   }
@@ -286,6 +416,8 @@ function buildItemFromMessage(msg) {
     id: "msg-" + msg.chat.id + "-" + msg.message_id,
     type: type, sourceChatId: String(msg.chat.id), sourceMessageId: Number(msg.message_id),
     fileId: fileId, caption: caption, entities: entities,
+    fileName: extractFileName(msg, type),
+    mimeType: extractMimeType(msg, type),
     hash: contentHash(caption, fileId),
     createdAt: Date.now(), attempts: 0, state: "pending", retryAt: 0
   };
@@ -301,30 +433,23 @@ async function makeCaption(env, kv, item) {
   return caption;
 }
 
+/* 🎯 sendSingle با smart fallback (V28) */
 async function sendSingle(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
   const caption = await makeCaption(env, kv, item);
-  if (item.type === "photo") {
-    try {
-      return await bale(env, "sendPhoto", { chat_id: c.dest, photo: item.fileId, caption: caption || undefined });
-    } catch (photoErr) {
-      console.log(JSON.stringify({ event: "PHOTO_FAILED_TRYING_DOCUMENT", id: item.id, err: photoErr.message }));
-      return await bale(env, "sendDocument", { chat_id: c.dest, document: item.fileId, caption: caption || undefined });
-    }
-  }
-  let method, payload;
   switch (item.type) {
-    case "video": method = "sendVideo"; payload = { chat_id: c.dest, video: item.fileId, caption: caption || undefined }; break;
-    case "document": method = "sendDocument"; payload = { chat_id: c.dest, document: item.fileId, caption: caption || undefined }; break;
-    case "audio": method = "sendAudio"; payload = { chat_id: c.dest, audio: item.fileId, caption: caption || undefined }; break;
-    case "voice": method = "sendVoice"; payload = { chat_id: c.dest, voice: item.fileId, caption: caption || undefined }; break;
-    case "animation": method = "sendAnimation"; payload = { chat_id: c.dest, animation: item.fileId, caption: caption || undefined }; break;
-    case "sticker": method = "sendSticker"; payload = { chat_id: c.dest, sticker: item.fileId }; break;
-    default: method = "sendMessage"; payload = { chat_id: c.dest, text: caption || item.caption || "—" };
+    case "photo": return await sendPhotoSmart(env, c.dest, item.fileId, caption);
+    case "video": return await sendVideoSmart(env, c.dest, item.fileId, caption, item.fileName);
+    case "document": return await sendDocumentSmart(env, c.dest, item.fileId, caption, item.fileName, item.mimeType);
+    case "audio": return await sendAudioSmart(env, c.dest, item.fileId, caption, item.fileName);
+    case "voice": return await sendVoiceSmart(env, c.dest, item.fileId, caption);
+    case "animation": return await sendAnimationSmart(env, c.dest, item.fileId, caption);
+    case "sticker": return await sendStickerSmart(env, c.dest, item.fileId);
+    default: return await bale(env, "sendMessage", { chat_id: c.dest, text: caption || item.caption || "—" });
   }
-  return await bale(env, method, payload);
 }
+
 async function sendAlbum(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
@@ -340,6 +465,7 @@ async function sendAlbum(env, item) {
   try {
     return await bale(env, "sendMediaGroup", { chat_id: c.dest, media: media });
   } catch (e) {
+    console.log(JSON.stringify({ event: "ALBUM_FALLBACK_SINGLE", err: e.message }));
     let n = 0;
     for (const sub of item.items) { await sendSingle(env, sub); n++; }
     if (n === 0) throw e;
@@ -393,16 +519,13 @@ async function handleTagAdmin(env, kv, c, msg) {
   const chatId = String(msg.chat.id);
 
   if (text === "/start" || text === "/menu" || text === "/tags") { await setState2(kv, chatId, null); await adminSay(env, chatId, MENUS.home.text, MENUS.home.rows); return true; }
-
-  /* 🎯 جدید: گزارش وضعیت در چت */
   if (text === "/status" || text === "/admin") {
     const st = await readState(kv);
     const bank = await loadHashtagBank(kv);
-    const txt = "📊 وضعیت بات (V27)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
+    const txt = "📊 وضعیت بات (V28)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
     await adminSay(env, chatId, txt, MENUS.home.rows);
     return true;
   }
-
   if (text === T_HASHTAG) { await setState2(kv, chatId, null); await adminSay(env, chatId, MENUS.hashtag.text, MENUS.hashtag.rows); return true; }
   if (text === T_CANCEL) { await setState2(kv, chatId, null); await adminSay(env, chatId, "🏠 برگشتیم", MENUS.home.rows); return true; }
   if (text === T_ADD) { await setState2(kv, chatId, { mode: "adding" }); await adminSay(env, chatId, "✏️ هر خط: کلمه #هشتگ1 #هشتگ2\nپایان: «❌ لغو»"); return true; }
@@ -561,7 +684,7 @@ async function onCron(env) {
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V27)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V28)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
