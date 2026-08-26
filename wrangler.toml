@@ -26,7 +26,8 @@ WINDOW_START_MIN = "510"
 WINDOW_END_MIN = "1350"
 ALBUM_QUIET_SEC = "20"
 ALBUM_TTL_SEC = "900"
-REPORT_INTERVAL_SEC = "3600"
+# 🎯 گزارش هر ۳ ساعت (به جای ۱ ساعت)
+REPORT_INTERVAL_SEC = "10800"
 LOCK_TTL_SEC = "120"
 SEEN_TTL_SEC = "604800"
 DLQ_TTL_SEC = "2592000"
@@ -42,13 +43,13 @@ binding = "MYNOTE_KV"
 id = "c0e487e2c5da4e46a61ce8dd2965ea96"
 
 # ============================================================
-# ⏰ Cron Triggers (هر 3 دقیقه بیدار شو)
+# ⏰ Cron Triggers (هر ۱۰ دقیقه — بهینه برای پلن رایگان)
 # ============================================================
 [triggers]
 crons = ["*/10 * * * *"]
 
 # ============================================================
-# 📊 Observability (فقط لاگ — بخش traces حذف شد)
+# 📊 Observability
 # ============================================================
 [observability]
 enabled = true
