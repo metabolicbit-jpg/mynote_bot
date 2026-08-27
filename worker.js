@@ -1,4 +1,4 @@
-const VERSION = "V29-FREE-2026-08-27";
+const VERSION = "V30-QUOTA-2026-08-27";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 const BALE_FILE_BASE = "https://tapi.bale.ai/file";
 const STATE_KEY = "mynote:state26";
@@ -7,6 +7,11 @@ const MIG_KEY = "mynote:migrated26";
 const HASHTAG_BANK_KEY = "mynote:hashtag_bank";
 const TAG_STATE_PREFIX = "mynote:tag_state:";
 const CLEAN_RULES_KEY = "mynote:cleaning_rules";
+
+/* 🎯 سقف سهمیهٔ پلن رایگان KV */
+const KV_LIMITS = { write: 1000, read: 100000, list: 1000 };
+let USAGE = { w: 0, r: 0, l: 0 };
+function count(op) { if (op === "w") USAGE.w++; else if (op === "r") USAGE.r++; else USAGE.l++; }
 
 const DEFAULTS = {
   MIN_DELAY_SEC: 180, MAX_DELAY_SEC: 600,
@@ -100,7 +105,7 @@ function cleanText(text, entities) {
 
 async function loadHashtagBank(kv) {
   try {
-    const bank = await kv.get(HASHTAG_BANK_KEY, "json");
+    const bank = await kv.get(HASHTAG_BANK_KEY, "json"); count("r");
     if (bank && bank.keywords) return { branding: bank.branding || DEFAULT_BANK.branding, fallback: bank.fallback || DEFAULT_BANK.fallback, keywords: bank.keywords };
   } catch (e) { }
   return { branding: DEFAULT_BANK.branding, fallback: DEFAULT_BANK.fallback, keywords: Object.assign({}, DEFAULT_BANK.keywords) };
@@ -123,7 +128,7 @@ async function buildCaption(kv, rawCaption, entities, destUsername) {
   return clean + "\n\n📌 منبع: @" + destUsername + "\n\n" + (await getSmartTags(kv, clean));
 }
 async function loadCleaningRules(kv) {
-  try { return (await kv.get(CLEAN_RULES_KEY, "json")) || { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] }; }
+  try { count("r"); return (await kv.get(CLEAN_RULES_KEY, "json")) || { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] }; }
   catch (e) { return { forbidden_phrases: [], forbidden_regex: [], replace_rules: [], remove_emojis: [], remove_lines: [] }; }
 }
 async function applyCustomRules(kv, text) {
@@ -182,14 +187,15 @@ function extractMimeType(msg, type) {
   return null;
 }
 
+/* 🎯 KV با شمارندهٔ مصرف */
 async function kvGetJSON(kv, key) {
-  try { return await kv.get(key, { type: "json", cacheTtl: 30 }); }
+  try { count("r"); return await kv.get(key, { type: "json", cacheTtl: 30 }); }
   catch (e) { throw e; }
 }
 async function kvPutJSON(kv, key, value, ttl) {
   try {
     const opts = ttl ? { expirationTtl: Math.max(60, Math.floor(ttl)) } : {};
-    await kv.put(key, JSON.stringify(value), opts);
+    count("w"); await kv.put(key, JSON.stringify(value), opts);
     return true;
   } catch (e) {
     const msg = String(e && e.message || "");
@@ -198,7 +204,7 @@ async function kvPutJSON(kv, key, value, ttl) {
     return false;
   }
 }
-async function kvDeleteSafe(kv, key) { try { await kv.delete(key); } catch (e) { } }
+async function kvDeleteSafe(kv, key) { try { count("w"); await kv.delete(key); } catch (e) { } }
 
 async function bale(env, method, payload) {
   const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
@@ -222,7 +228,6 @@ async function downloadFileBuffer(env, fileId) {
   if (!res.ok) throw new Error("Download failed: " + res.status);
   return { buffer: await res.arrayBuffer(), fileName: fileInfo.file_path.split("/").pop() };
 }
-
 async function sendWithUpload(env, method, field, dest, fileId, caption, fileName, mimeType) {
   const { buffer } = await downloadFileBuffer(env, fileId);
   const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
@@ -233,136 +238,123 @@ async function sendWithUpload(env, method, field, dest, fileId, caption, fileNam
   if (caption) form.append("caption", caption);
   const res = await fetch(BALE_BASE + token + "/" + method, { method: "POST", body: form });
   const data = await res.json().catch(function () { return null; });
-  if (!res.ok || !data || data.ok !== true) {
-    throw new Error("Upload " + method + ": " + ((data && data.description) || res.status));
-  }
+  if (!res.ok || !data || data.ok !== true) throw new Error("Upload " + method + ": " + ((data && data.description) || res.status));
   return data.result;
 }
-
 async function sendPhotoSmart(env, dest, fileId, caption) {
-  try {
-    return await bale(env, "sendPhoto", { chat_id: dest, photo: fileId, caption: caption || undefined });
-  } catch (e) {
+  try { return await bale(env, "sendPhoto", { chat_id: dest, photo: fileId, caption: caption || undefined }); }
+  catch (e) {
     const msg = String(e.message || "");
     if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
-      console.log(JSON.stringify({ event: "PHOTO_FALLBACK_UPLOAD", fileId: fileId, err: msg }));
+      console.log(JSON.stringify({ event: "PHOTO_FALLBACK_UPLOAD", fileId: fileId }));
       return await sendWithUpload(env, "sendPhoto", "photo", dest, fileId, caption, "photo.jpg", "image/jpeg");
     }
     throw e;
   }
 }
-
 async function sendVideoSmart(env, dest, fileId, caption, fileName) {
-  try {
-    return await bale(env, "sendVideo", { chat_id: dest, video: fileId, caption: caption || undefined });
-  } catch (e) {
+  try { return await bale(env, "sendVideo", { chat_id: dest, video: fileId, caption: caption || undefined }); }
+  catch (e) {
     const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
-      console.log(JSON.stringify({ event: "VIDEO_FALLBACK_UPLOAD", fileId: fileId }));
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
       return await sendWithUpload(env, "sendVideo", "video", dest, fileId, caption, fileName || "video.mp4", "video/mp4");
-    }
     throw e;
   }
 }
-
 async function sendDocumentSmart(env, dest, fileId, caption, fileName, mimeType) {
-  try {
-    return await bale(env, "sendDocument", { chat_id: dest, document: fileId, caption: caption || undefined });
-  } catch (e) {
+  try { return await bale(env, "sendDocument", { chat_id: dest, document: fileId, caption: caption || undefined }); }
+  catch (e) {
     const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
-      console.log(JSON.stringify({ event: "DOC_FALLBACK_UPLOAD", fileId: fileId }));
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
       return await sendWithUpload(env, "sendDocument", "document", dest, fileId, caption, fileName || "file", mimeType || "application/octet-stream");
-    }
     throw e;
   }
 }
-
 async function sendAudioSmart(env, dest, fileId, caption, fileName) {
-  try {
-    return await bale(env, "sendAudio", { chat_id: dest, audio: fileId, caption: caption || undefined });
-  } catch (e) {
+  try { return await bale(env, "sendAudio", { chat_id: dest, audio: fileId, caption: caption || undefined }); }
+  catch (e) {
     const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
       return await sendWithUpload(env, "sendAudio", "audio", dest, fileId, caption, fileName || "audio.mp3", "audio/mpeg");
-    }
     throw e;
   }
 }
-
 async function sendVoiceSmart(env, dest, fileId, caption) {
-  try {
-    return await bale(env, "sendVoice", { chat_id: dest, voice: fileId, caption: caption || undefined });
-  } catch (e) {
+  try { return await bale(env, "sendVoice", { chat_id: dest, voice: fileId, caption: caption || undefined }); }
+  catch (e) {
     const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
       return await sendWithUpload(env, "sendVoice", "voice", dest, fileId, caption, "voice.ogg", "audio/ogg");
-    }
     throw e;
   }
 }
-
 async function sendAnimationSmart(env, dest, fileId, caption) {
-  try {
-    return await bale(env, "sendAnimation", { chat_id: dest, animation: fileId, caption: caption || undefined });
-  } catch (e) {
+  try { return await bale(env, "sendAnimation", { chat_id: dest, animation: fileId, caption: caption || undefined }); }
+  catch (e) {
     const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
       return await sendWithUpload(env, "sendAnimation", "animation", dest, fileId, caption, "animation.mp4", "video/mp4");
-    }
     throw e;
   }
 }
-
 async function sendStickerSmart(env, dest, fileId) {
-  try {
-    return await bale(env, "sendSticker", { chat_id: dest, sticker: fileId });
-  } catch (e) {
+  try { return await bale(env, "sendSticker", { chat_id: dest, sticker: fileId }); }
+  catch (e) {
     const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
+    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
       return await sendWithUpload(env, "sendSticker", "sticker", dest, fileId, null, "sticker.webp", "image/webp");
-    }
     throw e;
   }
 }
 
 function emptyState() {
-  return { items: [], albums: {}, dlq: [], hashes: [], sched: { nextSendAt: 0, lastSendAt: 0, lastReportAt: 0, sent: 0, failed: 0, retries: 0, received: 0, ignored: 0, lastError: null, lastIgnoreReason: null } };
+  return { items: [], albums: {}, dlq: [], hashes: [], usage: null, sched: { nextSendAt: 0, lastSendAt: 0, lastReportAt: 0, sent: 0, failed: 0, retries: 0, received: 0, ignored: 0, lastError: null, lastIgnoreReason: null } };
 }
 async function readState(kv) { return (await kvGetJSON(kv, STATE_KEY)) || emptyState(); }
 
-/* 🎯 V29: tryLock silent + NOLOCK token (برای جلوگیری از 500 در quota exceeded) */
+/* 🎯 ذخیرهٔ مصرف روزانه داخل state (بدون نوشتن اضافه) */
+function flushUsage(st) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (!st.usage || st.usage.day !== today) st.usage = { day: today, w: 0, r: 0, l: 0 };
+  st.usage.w += USAGE.w; st.usage.r += USAGE.r; st.usage.l += USAGE.l;
+  USAGE = { w: 0, r: 0, l: 0 };
+}
+function quotaText(st) {
+  const u = st.usage || { w: 0, r: 0, l: 0 };
+  const wr = KV_LIMITS.write - u.w, rr = KV_LIMITS.read - u.r, lr = KV_LIMITS.list - u.l;
+  let t = "💾 سهمیهٔ KV امروز\n✍️ نوشتن: " + u.w + "/" + KV_LIMITS.write + " (مانده " + wr + ")\n📖 خواندن: " + u.r + "/" + KV_LIMITS.read + " (مانده " + rr + ")\n📋 list: " + u.l + "/" + KV_LIMITS.list + " (مانده " + lr + ")";
+  if (wr < 200) t += "\n⚠️ سهمیهٔ نوشتن رو به اتمام است!";
+  return t;
+}
+
 async function tryLock(kv, key, tries, waitMs) {
   for (let i = 0; i < tries; i++) {
     try {
-      const existing = await kv.get(key);
+      count("r"); const existing = await kv.get(key);
       if (!existing) {
         const token = crypto.randomUUID();
-        await kv.put(key, token, { expirationTtl: 60 });
-        const conf = await kv.get(key);
+        count("w"); await kv.put(key, token, { expirationTtl: 60 });
+        count("r"); const conf = await kv.get(key);
         if (conf === token) return token;
       }
     } catch (e) {
       const msg = String(e && e.message || "");
-      if (msg.includes("limit exceeded")) {
-        console.log(JSON.stringify({ event: "LOCK_QUOTA_SKIP" }));
-        return "NOLOCK";
-      }
+      if (msg.includes("limit exceeded")) { console.log(JSON.stringify({ event: "LOCK_QUOTA_SKIP" })); return "NOLOCK"; }
     }
     if (i < tries - 1) await sleep(waitMs);
   }
   return null;
 }
-/* 🎯 V29: unlock با پشتیبانی از NOLOCK */
 async function unlock(kv, key, token) {
   if (!token || token === "NOLOCK") return;
-  if ((await kv.get(key)) === token) await kvDeleteSafe(kv, key);
+  count("r"); if ((await kv.get(key)) === token) await kvDeleteSafe(kv, key);
 }
 async function withState(kv, mutate) {
   const token = await tryLock(kv, QLOCK_KEY, 12, 100);
   try {
     const st = await readState(kv);
     const out = mutate(st) || {};
+    flushUsage(st);
     await kvPutJSON(kv, STATE_KEY, st, 2592000);
     return out;
   } finally {
@@ -371,7 +363,7 @@ async function withState(kv, mutate) {
 }
 
 async function migrate(kv) {
-  if (await kv.get(MIG_KEY)) return;
+  if (await kvGetJSON(kv, MIG_KEY)) return;
   try {
     const oldQueue = (await kvGetJSON(kv, "mynote:queue")) || [];
     const oldDlq = (await kvGetJSON(kv, "mynote:dlq")) || [];
@@ -394,25 +386,18 @@ async function migrate(kv) {
       for (const it of oldDlq) st.dlq.push(it);
       for (const mgid of Object.keys(oldAlbums)) {
         const a = oldAlbums[mgid];
-        if (a && a.items && a.items.length) {
-          st.items.push({ id: a.id, type: "album", sourceChatId: a.sourceChatId, mediaGroupId: a.mediaGroupId, items: a.items, createdAt: Date.now(), attempts: 0, state: "pending", retryAt: 0 });
-        }
+        if (a && a.items && a.items.length) st.items.push({ id: a.id, type: "album", sourceChatId: a.sourceChatId, mediaGroupId: a.mediaGroupId, items: a.items, createdAt: Date.now(), attempts: 0, state: "pending", retryAt: 0 });
       }
       for (const h of oldHashes) { if (!st.hashes.includes(h)) st.hashes.push(h); }
       if (oldSched) Object.assign(st.sched, oldSched);
       return {};
     });
-    await kvDeleteSafe(kv, "mynote:queue");
-    await kvDeleteSafe(kv, "mynote:dlq");
-    await kvDeleteSafe(kv, "mynote:albums");
-    await kvDeleteSafe(kv, "mynote:sched");
-    await kvDeleteSafe(kv, "mynote:state24");
-    await kvDeleteSafe(kv, "mynote:state25");
+    await kvDeleteSafe(kv, "mynote:queue"); await kvDeleteSafe(kv, "mynote:dlq");
+    await kvDeleteSafe(kv, "mynote:albums"); await kvDeleteSafe(kv, "mynote:sched");
+    await kvDeleteSafe(kv, "mynote:state24"); await kvDeleteSafe(kv, "mynote:state25");
     await kvDeleteSafe(kv, "mynote:last_webhook");
-    console.log(JSON.stringify({ event: "MIGRATED_TO_V29" }));
-  } catch (e) {
-    console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message }));
-  }
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V30" }));
+  } catch (e) { console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message })); }
   await kvPutJSON(kv, MIG_KEY, { at: Date.now() }, 2592000);
 }
 
@@ -425,13 +410,11 @@ function buildItemFromMessage(msg) {
     id: "msg-" + msg.chat.id + "-" + msg.message_id,
     type: type, sourceChatId: String(msg.chat.id), sourceMessageId: Number(msg.message_id),
     fileId: fileId, caption: caption, entities: entities,
-    fileName: extractFileName(msg, type),
-    mimeType: extractMimeType(msg, type),
+    fileName: extractFileName(msg, type), mimeType: extractMimeType(msg, type),
     hash: contentHash(caption, fileId),
     createdAt: Date.now(), attempts: 0, state: "pending", retryAt: 0
   };
 }
-
 async function makeCaption(env, kv, item) {
   const c = cfg(env);
   let caption = item.caption || "";
@@ -441,7 +424,6 @@ async function makeCaption(env, kv, item) {
   }
   return caption;
 }
-
 async function sendSingle(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
@@ -457,7 +439,6 @@ async function sendSingle(env, item) {
     default: return await bale(env, "sendMessage", { chat_id: c.dest, text: caption || item.caption || "—" });
   }
 }
-
 async function sendAlbum(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
@@ -470,9 +451,8 @@ async function sendAlbum(env, item) {
     else if (sub.type === "audio") type = "audio";
     media.push({ type: type, media: sub.fileId, caption: cap || undefined });
   }
-  try {
-    return await bale(env, "sendMediaGroup", { chat_id: c.dest, media: media });
-  } catch (e) {
+  try { return await bale(env, "sendMediaGroup", { chat_id: c.dest, media: media }); }
+  catch (e) {
     console.log(JSON.stringify({ event: "ALBUM_FALLBACK_SINGLE", err: e.message }));
     let n = 0;
     for (const sub of item.items) { await sendSingle(env, sub); n++; }
@@ -487,7 +467,7 @@ async function deleteSourceMessage(env, item) {
   catch (e) { }
 }
 
-async function getState2(kv, chatId) { try { return await kv.get(TAG_STATE_PREFIX + chatId, "json"); } catch (e) { return null; } }
+async function getState2(kv, chatId) { try { count("r"); return await kv.get(TAG_STATE_PREFIX + chatId, "json"); } catch (e) { return null; } }
 async function setState2(kv, chatId, state) { if (!state) { await kvDeleteSafe(kv, TAG_STATE_PREFIX + chatId); return; } await kvPutJSON(kv, TAG_STATE_PREFIX + chatId, state, 3600); }
 function makeKeyboard(rows) { return { keyboard: rows, resize_keyboard: true }; }
 async function adminSay(env, chatId, text, rows) {
@@ -525,12 +505,11 @@ function parseAddInput(text) {
 async function handleTagAdmin(env, kv, c, msg) {
   const text = (msg.text || "").trim();
   const chatId = String(msg.chat.id);
-
   if (text === "/start" || text === "/menu" || text === "/tags") { await setState2(kv, chatId, null); await adminSay(env, chatId, MENUS.home.text, MENUS.home.rows); return true; }
   if (text === "/status" || text === "/admin") {
     const st = await readState(kv);
     const bank = await loadHashtagBank(kv);
-    const txt = "📊 وضعیت بات (V29)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
+    const txt = "📊 وضعیت بات (V30)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
     await adminSay(env, chatId, txt, MENUS.home.rows);
     return true;
   }
@@ -553,7 +532,6 @@ async function handleTagAdmin(env, kv, c, msg) {
     return true;
   }
   if (text === T_TEST) { await setState2(kv, chatId, { mode: "testing" }); await adminSay(env, chatId, "🔍 متنی بفرست"); return true; }
-
   const state = await getState2(kv, chatId);
   if (!state) return false;
   if (state.mode === "adding") {
@@ -621,9 +599,7 @@ async function processMessage(KV, c, env, msg, body, isEdit) {
       if (handled) return new Response(JSON.stringify({ ok: true, admin: true }), { headers: { "Content-Type": "application/json" } });
     }
   }
-  if (c.dest && chatId === c.dest) {
-    return new Response(JSON.stringify({ ok: true, ignored: true, reason: "dest_echo" }), { headers: { "Content-Type": "application/json" } });
-  }
+  if (c.dest && chatId === c.dest) return new Response(JSON.stringify({ ok: true, ignored: true, reason: "dest_echo" }), { headers: { "Content-Type": "application/json" } });
   if (c.source) {
     const sourceMatches = chatId === c.source || chatId === "-100" + c.source;
     if (!sourceMatches) {
@@ -634,13 +610,11 @@ async function processMessage(KV, c, env, msg, body, isEdit) {
   const item = buildItemFromMessage(msg);
   const result = await withState(KV, function (st) {
     if (item.hash && st.hashes.includes(item.hash)) {
-      st.sched.ignored = (st.sched.ignored || 0) + 1;
-      st.sched.lastIgnoreReason = "duplicate_hash";
+      st.sched.ignored = (st.sched.ignored || 0) + 1; st.sched.lastIgnoreReason = "duplicate_hash";
       return { dup: true, reason: "duplicate_hash" };
     }
     if (st.items.some(function (x) { return x.id === item.id; })) {
-      st.sched.ignored = (st.sched.ignored || 0) + 1;
-      st.sched.lastIgnoreReason = "duplicate_id";
+      st.sched.ignored = (st.sched.ignored || 0) + 1; st.sched.lastIgnoreReason = "duplicate_id";
       return { dup: true, reason: "duplicate_id" };
     }
     if (msg.media_group_id) {
@@ -649,9 +623,7 @@ async function processMessage(KV, c, env, msg, body, isEdit) {
       if (!a.items.some(function (x) { return x.id === item.id; })) a.items.push(item);
       a.updatedAt = Date.now();
       st.albums[mgid] = a;
-    } else {
-      st.items.push(item);
-    }
+    } else { st.items.push(item); }
     if (item.hash) { st.hashes.push(item.hash); while (st.hashes.length > c.hashHistory) st.hashes.shift(); }
     st.sched.received = (st.sched.received || 0) + 1;
     return { ok: true, album: !!msg.media_group_id, queueLen: st.items.length };
@@ -670,7 +642,6 @@ function backoffSeconds(attempt, retryAfter) {
   return delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)];
 }
 
-/* 🎯 V29: گزارش فقط در بازه ۸:۳۰-۲۲:۳۰ + فاصله ۳ ساعت */
 async function onCron(env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
@@ -682,32 +653,24 @@ async function onCron(env) {
     await withState(KV, function (s) {
       for (const k of dueAlbums) {
         const a = s.albums[k];
-        if (a && a.items && a.items.length) {
-          s.items.push({ id: a.id, type: "album", sourceChatId: a.sourceChatId, mediaGroupId: a.mediaGroupId, items: a.items, createdAt: now, attempts: 0, state: "pending", retryAt: 0 });
-        }
+        if (a && a.items && a.items.length) s.items.push({ id: a.id, type: "album", sourceChatId: a.sourceChatId, mediaGroupId: a.mediaGroupId, items: a.items, createdAt: now, attempts: 0, state: "pending", retryAt: 0 });
         delete s.albums[k];
       }
       return {};
     });
   }
-
-  /* 🎯 V29: خارج از بازه ۸:۳۰-۲۲:۳۰ → فقط cron را اجرا کن، گزارش نده و ارسال نکن */
   if (!inWindow(c)) {
-    /* ریست nextSendAt اگر چیزی مانده باشد تا اول صبح دوباره زمان‌بندی شود */
     const stW = await readState(KV);
     if (stW.sched.nextSendAt) await withState(KV, function (s) { s.sched.nextSendAt = 0; return {}; });
     return;
   }
-
-  /* 🎯 V29: گزارش ۳ ساعته فقط داخل window */
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V29)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V30)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
-
   const st2 = await readState(KV);
   if (st2.items.length === 0) {
     if (st2.sched.nextSendAt) await withState(KV, function (s) { s.sched.nextSendAt = 0; return {}; });
@@ -732,34 +695,20 @@ async function onCron(env) {
   const item = picked.item;
   let ok = false, errMsg = "", retryAfter = 0;
   try {
-    if (item.type === "album") {
-      await sendAlbum(env, item);
-      if (c.deleteSource) { for (const sub of item.items) await deleteSourceMessage(env, sub); }
-    } else {
-      await sendSingle(env, item);
-      await deleteSourceMessage(env, item);
-    }
+    if (item.type === "album") { await sendAlbum(env, item); if (c.deleteSource) { for (const sub of item.items) await deleteSourceMessage(env, sub); } }
+    else { await sendSingle(env, item); await deleteSourceMessage(env, item); }
     ok = true;
     console.log(JSON.stringify({ event: "SEND_SUCCESS", id: item.id, type: item.type }));
   } catch (e) { errMsg = e.message || String(e); retryAfter = e.retryAfter || 0; }
   await withState(KV, function (s) {
-    if (ok) {
-      s.sched.sent = (s.sched.sent || 0) + 1;
-      s.sched.lastSendAt = now;
-      s.sched.lastError = null;
-    } else if ((item.attempts || 0) + 1 >= c.maxRetries) {
-      item.failedAt = now; item.lastError = errMsg;
-      s.dlq.push(item);
-      s.sched.failed = (s.sched.failed || 0) + 1;
-      s.sched.lastError = errMsg;
+    if (ok) { s.sched.sent = (s.sched.sent || 0) + 1; s.sched.lastSendAt = now; s.sched.lastError = null; }
+    else if ((item.attempts || 0) + 1 >= c.maxRetries) {
+      item.failedAt = now; item.lastError = errMsg; s.dlq.push(item);
+      s.sched.failed = (s.sched.failed || 0) + 1; s.sched.lastError = errMsg;
     } else {
-      item.attempts = (item.attempts || 0) + 1;
-      item.state = "retry";
-      item.retryAt = now + backoffSeconds(item.attempts, retryAfter) * 1000;
-      item.lastError = errMsg;
-      s.items.push(item);
-      s.sched.retries = (s.sched.retries || 0) + 1;
-      s.sched.lastError = errMsg;
+      item.attempts = (item.attempts || 0) + 1; item.state = "retry";
+      item.retryAt = now + backoffSeconds(item.attempts, retryAfter) * 1000; item.lastError = errMsg;
+      s.items.push(item); s.sched.retries = (s.sched.retries || 0) + 1; s.sched.lastError = errMsg;
     }
     return {};
   });
@@ -781,10 +730,7 @@ export default {
     if (p === "/webhook" || p === "/telegram/webhook") {
       if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
       try { return await onWebhook(request, env); }
-      catch (e) {
-        console.log(JSON.stringify({ event: "WEBHOOK_ERROR", err: e.message }));
-        return json({ ok: false, error: e.message }, 500);
-      }
+      catch (e) { console.log(JSON.stringify({ event: "WEBHOOK_ERROR", err: e.message })); return json({ ok: false, error: e.message }, 500); }
     }
     if (p === "/health") return json({ ok: true, version: VERSION });
     if (p === "/admin/status") {
@@ -792,7 +738,7 @@ export default {
       const st = await readState(KV);
       const bank = await loadHashtagBank(KV);
       const config = cfg(env);
-      return json({ version: VERSION, config: { source: config.source, dest: config.dest, windowOn: config.windowOn, deleteSource: config.deleteSource, acceptEdits: config.acceptEdits }, scheduler: st.sched, queue: st.items.length, dlq: st.dlq.length, albums: Object.keys(st.albums).length, hashtagCount: Object.keys(bank.keywords).length, time: iso() });
+      return json({ version: VERSION, config: { source: config.source, dest: config.dest, windowOn: config.windowOn, deleteSource: config.deleteSource, acceptEdits: config.acceptEdits }, scheduler: st.sched, queue: st.items.length, dlq: st.dlq.length, albums: Object.keys(st.albums).length, hashtagCount: Object.keys(bank.keywords).length, usage: st.usage, kvLimits: KV_LIMITS, time: iso() });
     }
     if (p === "/admin/reset") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
@@ -873,19 +819,14 @@ export default {
     if (p === "/admin/webhook-info") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
-      try {
-        const res = await fetch(BALE_BASE + token + "/getWebhookInfo");
-        return json({ ok: true, info: await res.json() });
-      } catch (e) { return json({ ok: false, error: e.message }, 500); }
+      try { const res = await fetch(BALE_BASE + token + "/getWebhookInfo"); return json({ ok: true, info: await res.json() }); }
+      catch (e) { return json({ ok: false, error: e.message }, 500); }
     }
     if (p === "/admin/get-updates") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
-      try {
-        const res = await fetch(BALE_BASE + token + "/getUpdates?limit=10&timeout=0");
-        const data = await res.json();
-        return json({ ok: true, updates: data });
-      } catch (e) { return json({ ok: false, error: e.message }, 500); }
+      try { const res = await fetch(BALE_BASE + token + "/getUpdates?limit=10&timeout=0"); return json({ ok: true, updates: await res.json() }); }
+      catch (e) { return json({ ok: false, error: e.message }, 500); }
     }
     if (p === "/") { const st = KV ? await readState(KV) : {}; return json({ ok: true, service: "mynote_bot", version: VERSION, stats: st.sched }); }
     return new Response("Not Found", { status: 404 });
