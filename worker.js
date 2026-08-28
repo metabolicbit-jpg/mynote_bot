@@ -1,4 +1,4 @@
-const VERSION = "V31-NOLost-2026-08-28";
+const VERSION = "V32-ROLLOVER-2026-08-28";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 const BALE_FILE_BASE = "https://tapi.bale.ai/file";
 const STATE_KEY = "mynote:state26";
@@ -310,6 +310,13 @@ function emptyState() {
 }
 async function readState(kv) { return (await kvGetJSON(kv, STATE_KEY)) || emptyState(); }
 
+/* 🎯 V32: خواندن usage بدون نوشتن — اگر روز عوض شده، صفر نشان می‌دهد */
+function readUsage(st) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (!st.usage || st.usage.day !== today) return { day: today, w: 0, r: 0, l: 0 };
+  return st.usage;
+}
+
 function flushUsage(st) {
   const today = new Date().toISOString().slice(0, 10);
   if (!st.usage || st.usage.day !== today) st.usage = { day: today, w: 0, r: 0, l: 0 };
@@ -317,7 +324,7 @@ function flushUsage(st) {
   USAGE = { w: 0, r: 0, l: 0 };
 }
 function quotaText(st) {
-  const u = st.usage || { w: 0, r: 0, l: 0 };
+  const u = readUsage(st);
   const wr = KV_LIMITS.write - u.w, rr = KV_LIMITS.read - u.r, lr = KV_LIMITS.list - u.l;
   let t = "💾 سهمیهٔ KV امروز\n✍️ نوشتن: " + u.w + "/" + KV_LIMITS.write + " (مانده " + wr + ")\n📖 خواندن: " + u.r + "/" + KV_LIMITS.read + " (مانده " + rr + ")\n📋 list: " + u.l + "/" + KV_LIMITS.list + " (مانده " + lr + ")";
   if (wr < 200) t += "\n⚠️ سهمیهٔ نوشتن رو به اتمام است!";
@@ -393,7 +400,7 @@ async function migrate(kv) {
     await kvDeleteSafe(kv, "mynote:albums"); await kvDeleteSafe(kv, "mynote:sched");
     await kvDeleteSafe(kv, "mynote:state24"); await kvDeleteSafe(kv, "mynote:state25");
     await kvDeleteSafe(kv, "mynote:last_webhook");
-    console.log(JSON.stringify({ event: "MIGRATED_TO_V31" }));
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V32" }));
   } catch (e) { console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message })); }
   await kvPutJSON(kv, MIG_KEY, { at: Date.now() }, 2592000);
 }
@@ -506,7 +513,7 @@ async function handleTagAdmin(env, kv, c, msg) {
   if (text === "/status" || text === "/admin") {
     const st = await readState(kv);
     const bank = await loadHashtagBank(kv);
-    const txt = "📊 وضعیت بات (V31)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
+    const txt = "📊 وضعیت بات (V32)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
     await adminSay(env, chatId, txt, MENUS.home.rows);
     return true;
   }
@@ -644,7 +651,6 @@ async function onCron(env) {
   const c = cfg(env);
   await migrate(KV);
 
-  /* 🎯 V31: بازیابی پست‌های گیرکرده در processing + رollover روزانه */
   const pre = await readState(KV);
   const today = new Date().toISOString().slice(0, 10);
   const stuck = pre.items.some(function (it) { return it.state === "processing" && (Date.now() - (it.processingAt || 0)) > 600000; });
@@ -680,7 +686,7 @@ async function onCron(env) {
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V31)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V32)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
@@ -696,7 +702,6 @@ async function onCron(env) {
   }
   if (now < st2.sched.nextSendAt) return;
 
-  /* 🎯 V31: علامت processing (حذف فقط بعد از تأیید ارسال) */
   const picked = await withState(KV, function (s) {
     const idx = s.items.findIndex(function (it) {
       return it.state === "pending" || (it.state === "retry" && (it.retryAt || 0) <= now) || (it.state === "processing" && (now - (it.processingAt || 0)) > 600000);
@@ -721,7 +726,6 @@ async function onCron(env) {
     console.log(JSON.stringify({ event: "SEND_SUCCESS", id: item.id, type: item.type }));
   } catch (e) { errMsg = e.message || String(e); retryAfter = e.retryAfter || 0; }
 
-  /* 🎯 V31: settle — حذف فقط اگر ارسال موفق بود */
   await withState(KV, function (s) {
     const idx = s.items.findIndex(function (x) { return x.id === item.id; });
     if (ok) {
@@ -767,7 +771,7 @@ export default {
       const st = await readState(KV);
       const bank = await loadHashtagBank(KV);
       const config = cfg(env);
-      return json({ version: VERSION, config: { source: config.source, dest: config.dest, windowOn: config.windowOn, deleteSource: config.deleteSource, acceptEdits: config.acceptEdits }, scheduler: st.sched, queue: st.items.length, dlq: st.dlq.length, albums: Object.keys(st.albums).length, hashtagCount: Object.keys(bank.keywords).length, usage: st.usage, kvLimits: KV_LIMITS, time: iso() });
+      return json({ version: VERSION, config: { source: config.source, dest: config.dest, windowOn: config.windowOn, deleteSource: config.deleteSource, acceptEdits: config.acceptEdits }, scheduler: st.sched, queue: st.items.length, dlq: st.dlq.length, albums: Object.keys(st.albums).length, hashtagCount: Object.keys(bank.keywords).length, usage: readUsage(st), kvLimits: KV_LIMITS, time: iso() });
     }
     if (p === "/admin/reset") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
