@@ -1,4 +1,4 @@
-const VERSION = "V30-QUOTA-2026-08-27";
+const VERSION = "V31-NOLost-2026-08-28";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 const BALE_FILE_BASE = "https://tapi.bale.ai/file";
 const STATE_KEY = "mynote:state26";
@@ -8,7 +8,6 @@ const HASHTAG_BANK_KEY = "mynote:hashtag_bank";
 const TAG_STATE_PREFIX = "mynote:tag_state:";
 const CLEAN_RULES_KEY = "mynote:cleaning_rules";
 
-/* 🎯 سقف سهمیهٔ پلن رایگان KV */
 const KV_LIMITS = { write: 1000, read: 100000, list: 1000 };
 let USAGE = { w: 0, r: 0, l: 0 };
 function count(op) { if (op === "w") USAGE.w++; else if (op === "r") USAGE.r++; else USAGE.l++; }
@@ -105,7 +104,7 @@ function cleanText(text, entities) {
 
 async function loadHashtagBank(kv) {
   try {
-    const bank = await kv.get(HASHTAG_BANK_KEY, "json"); count("r");
+    count("r"); const bank = await kv.get(HASHTAG_BANK_KEY, "json");
     if (bank && bank.keywords) return { branding: bank.branding || DEFAULT_BANK.branding, fallback: bank.fallback || DEFAULT_BANK.fallback, keywords: bank.keywords };
   } catch (e) { }
   return { branding: DEFAULT_BANK.branding, fallback: DEFAULT_BANK.fallback, keywords: Object.assign({}, DEFAULT_BANK.keywords) };
@@ -187,7 +186,6 @@ function extractMimeType(msg, type) {
   return null;
 }
 
-/* 🎯 KV با شمارندهٔ مصرف */
 async function kvGetJSON(kv, key) {
   try { count("r"); return await kv.get(key, { type: "json", cacheTtl: 30 }); }
   catch (e) { throw e; }
@@ -312,7 +310,6 @@ function emptyState() {
 }
 async function readState(kv) { return (await kvGetJSON(kv, STATE_KEY)) || emptyState(); }
 
-/* 🎯 ذخیرهٔ مصرف روزانه داخل state (بدون نوشتن اضافه) */
 function flushUsage(st) {
   const today = new Date().toISOString().slice(0, 10);
   if (!st.usage || st.usage.day !== today) st.usage = { day: today, w: 0, r: 0, l: 0 };
@@ -396,7 +393,7 @@ async function migrate(kv) {
     await kvDeleteSafe(kv, "mynote:albums"); await kvDeleteSafe(kv, "mynote:sched");
     await kvDeleteSafe(kv, "mynote:state24"); await kvDeleteSafe(kv, "mynote:state25");
     await kvDeleteSafe(kv, "mynote:last_webhook");
-    console.log(JSON.stringify({ event: "MIGRATED_TO_V30" }));
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V31" }));
   } catch (e) { console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message })); }
   await kvPutJSON(kv, MIG_KEY, { at: Date.now() }, 2592000);
 }
@@ -509,7 +506,7 @@ async function handleTagAdmin(env, kv, c, msg) {
   if (text === "/status" || text === "/admin") {
     const st = await readState(kv);
     const bank = await loadHashtagBank(kv);
-    const txt = "📊 وضعیت بات (V30)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
+    const txt = "📊 وضعیت بات (V31)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
     await adminSay(env, chatId, txt, MENUS.home.rows);
     return true;
   }
@@ -646,6 +643,22 @@ async function onCron(env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
   await migrate(KV);
+
+  /* 🎯 V31: بازیابی پست‌های گیرکرده در processing + رollover روزانه */
+  const pre = await readState(KV);
+  const today = new Date().toISOString().slice(0, 10);
+  const stuck = pre.items.some(function (it) { return it.state === "processing" && (Date.now() - (it.processingAt || 0)) > 600000; });
+  if (stuck || (pre.usage && pre.usage.day !== today)) {
+    await withState(KV, function (s) {
+      const now2 = Date.now();
+      for (const it of s.items) {
+        if (it.state === "processing" && (now2 - (it.processingAt || 0)) > 600000) { it.state = "pending"; it.processingAt = 0; }
+      }
+      if (s.usage && s.usage.day !== today) s.usage = { day: today, w: 0, r: 0, l: 0 };
+      return {};
+    });
+  }
+
   const st0 = await readState(KV);
   const now = Date.now();
   const dueAlbums = Object.keys(st0.albums).filter(function (k) { return now - (st0.albums[k].updatedAt || 0) >= c.albumQuiet * 1000; });
@@ -667,7 +680,7 @@ async function onCron(env) {
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V30)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V31)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
@@ -682,11 +695,18 @@ async function onCron(env) {
     return;
   }
   if (now < st2.sched.nextSendAt) return;
+
+  /* 🎯 V31: علامت processing (حذف فقط بعد از تأیید ارسال) */
   const picked = await withState(KV, function (s) {
-    const idx = s.items.findIndex(function (it) { return it.state === "pending" || (it.state === "retry" && (it.retryAt || 0) <= now); });
+    const idx = s.items.findIndex(function (it) {
+      return it.state === "pending" || (it.state === "retry" && (it.retryAt || 0) <= now) || (it.state === "processing" && (now - (it.processingAt || 0)) > 600000);
+    });
     if (idx === -1) return { item: null };
     const item = s.items[idx];
-    s.items.splice(idx, 1);
+    item.state = "processing";
+    item.processingAt = now;
+    item.attempts = (item.attempts || 0) + 1;
+    s.items[idx] = item;
     const delay = Math.floor(c.minDelay + Math.random() * (c.maxDelay - c.minDelay + 1));
     s.sched.nextSendAt = now + delay * 1000;
     return { item: item };
@@ -700,15 +720,24 @@ async function onCron(env) {
     ok = true;
     console.log(JSON.stringify({ event: "SEND_SUCCESS", id: item.id, type: item.type }));
   } catch (e) { errMsg = e.message || String(e); retryAfter = e.retryAfter || 0; }
+
+  /* 🎯 V31: settle — حذف فقط اگر ارسال موفق بود */
   await withState(KV, function (s) {
-    if (ok) { s.sched.sent = (s.sched.sent || 0) + 1; s.sched.lastSendAt = now; s.sched.lastError = null; }
-    else if ((item.attempts || 0) + 1 >= c.maxRetries) {
+    const idx = s.items.findIndex(function (x) { return x.id === item.id; });
+    if (ok) {
+      if (idx !== -1) s.items.splice(idx, 1);
+      s.sched.sent = (s.sched.sent || 0) + 1; s.sched.lastSendAt = now; s.sched.lastError = null;
+    } else if ((item.attempts || 0) >= c.maxRetries) {
+      if (idx !== -1) s.items.splice(idx, 1);
       item.failedAt = now; item.lastError = errMsg; s.dlq.push(item);
       s.sched.failed = (s.sched.failed || 0) + 1; s.sched.lastError = errMsg;
     } else {
-      item.attempts = (item.attempts || 0) + 1; item.state = "retry";
-      item.retryAt = now + backoffSeconds(item.attempts, retryAfter) * 1000; item.lastError = errMsg;
-      s.items.push(item); s.sched.retries = (s.sched.retries || 0) + 1; s.sched.lastError = errMsg;
+      if (idx !== -1) {
+        const it = s.items[idx];
+        it.state = "retry"; it.retryAt = now + backoffSeconds(it.attempts, retryAfter) * 1000; it.lastError = errMsg;
+        s.items[idx] = it;
+      }
+      s.sched.retries = (s.sched.retries || 0) + 1; s.sched.lastError = errMsg;
     }
     return {};
   });
