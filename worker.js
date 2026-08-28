@@ -1,4 +1,4 @@
-const VERSION = "V32-ROLLOVER-2026-08-28";
+const VERSION = "V33-COPY-FALLBACK-2026-08-28";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 const BALE_FILE_BASE = "https://tapi.bale.ai/file";
 const STATE_KEY = "mynote:state26";
@@ -249,55 +249,43 @@ async function sendPhotoSmart(env, dest, fileId, caption) {
 async function sendVideoSmart(env, dest, fileId, caption, fileName) {
   try { return await bale(env, "sendVideo", { chat_id: dest, video: fileId, caption: caption || undefined }); }
   catch (e) {
-    const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
-      return await sendWithUpload(env, "sendVideo", "video", dest, fileId, caption, fileName || "video.mp4", "video/mp4");
-    throw e;
+    console.log(JSON.stringify({ event: "VIDEO_FALLBACK_UPLOAD", fileId: fileId, err: String(e.message) }));
+    return await sendWithUpload(env, "sendVideo", "video", dest, fileId, caption, fileName || "video.mp4", "video/mp4");
   }
 }
 async function sendDocumentSmart(env, dest, fileId, caption, fileName, mimeType) {
   try { return await bale(env, "sendDocument", { chat_id: dest, document: fileId, caption: caption || undefined }); }
   catch (e) {
-    const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
-      return await sendWithUpload(env, "sendDocument", "document", dest, fileId, caption, fileName || "file", mimeType || "application/octet-stream");
-    throw e;
+    console.log(JSON.stringify({ event: "DOC_FALLBACK_UPLOAD", fileId: fileId, err: String(e.message) }));
+    return await sendWithUpload(env, "sendDocument", "document", dest, fileId, caption, fileName || "file", mimeType || "application/octet-stream");
   }
 }
 async function sendAudioSmart(env, dest, fileId, caption, fileName) {
   try { return await bale(env, "sendAudio", { chat_id: dest, audio: fileId, caption: caption || undefined }); }
   catch (e) {
-    const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
-      return await sendWithUpload(env, "sendAudio", "audio", dest, fileId, caption, fileName || "audio.mp3", "audio/mpeg");
-    throw e;
+    console.log(JSON.stringify({ event: "AUDIO_FALLBACK_UPLOAD", fileId: fileId, err: String(e.message) }));
+    return await sendWithUpload(env, "sendAudio", "audio", dest, fileId, caption, fileName || "audio.mp3", "audio/mpeg");
   }
 }
 async function sendVoiceSmart(env, dest, fileId, caption) {
   try { return await bale(env, "sendVoice", { chat_id: dest, voice: fileId, caption: caption || undefined }); }
   catch (e) {
-    const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
-      return await sendWithUpload(env, "sendVoice", "voice", dest, fileId, caption, "voice.ogg", "audio/ogg");
-    throw e;
+    console.log(JSON.stringify({ event: "VOICE_FALLBACK_UPLOAD", fileId: fileId, err: String(e.message) }));
+    return await sendWithUpload(env, "sendVoice", "voice", dest, fileId, caption, "voice.ogg", "audio/ogg");
   }
 }
 async function sendAnimationSmart(env, dest, fileId, caption) {
   try { return await bale(env, "sendAnimation", { chat_id: dest, animation: fileId, caption: caption || undefined }); }
   catch (e) {
-    const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
-      return await sendWithUpload(env, "sendAnimation", "animation", dest, fileId, caption, "animation.mp4", "video/mp4");
-    throw e;
+    console.log(JSON.stringify({ event: "ANIM_FALLBACK_UPLOAD", fileId: fileId, err: String(e.message) }));
+    return await sendWithUpload(env, "sendAnimation", "animation", dest, fileId, caption, "animation.mp4", "video/mp4");
   }
 }
 async function sendStickerSmart(env, dest, fileId) {
   try { return await bale(env, "sendSticker", { chat_id: dest, sticker: fileId }); }
   catch (e) {
-    const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found"))
-      return await sendWithUpload(env, "sendSticker", "sticker", dest, fileId, null, "sticker.webp", "image/webp");
-    throw e;
+    console.log(JSON.stringify({ event: "STICKER_FALLBACK_UPLOAD", fileId: fileId, err: String(e.message) }));
+    return await sendWithUpload(env, "sendSticker", "sticker", dest, fileId, null, "sticker.webp", "image/webp");
   }
 }
 
@@ -306,7 +294,6 @@ function emptyState() {
 }
 async function readState(kv) { return (await kvGetJSON(kv, STATE_KEY)) || emptyState(); }
 
-/* 🎯 V32: خواندن usage بدون نوشتن — اگر روز عوض شده، صفر نشان می‌دهد */
 function readUsage(st) {
   const today = new Date().toISOString().slice(0, 10);
   if (!st.usage || st.usage.day !== today) return { day: today, w: 0, r: 0, l: 0 };
@@ -396,7 +383,7 @@ async function migrate(kv) {
     await kvDeleteSafe(kv, "mynote:albums"); await kvDeleteSafe(kv, "mynote:sched");
     await kvDeleteSafe(kv, "mynote:state24"); await kvDeleteSafe(kv, "mynote:state25");
     await kvDeleteSafe(kv, "mynote:last_webhook");
-    console.log(JSON.stringify({ event: "MIGRATED_TO_V32" }));
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V33" }));
   } catch (e) { console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message })); }
   await kvPutJSON(kv, MIG_KEY, { at: Date.now() }, 2592000);
 }
@@ -424,19 +411,29 @@ async function makeCaption(env, kv, item) {
   }
   return caption;
 }
+
+/* 🎯 V33: sendSingle با ۳ پله: smart send → upload → copyMessage */
 async function sendSingle(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
   const caption = await makeCaption(env, kv, item);
-  switch (item.type) {
-    case "photo": return await sendPhotoSmart(env, c.dest, item.fileId, caption);
-    case "video": return await sendVideoSmart(env, c.dest, item.fileId, caption, item.fileName);
-    case "document": return await sendDocumentSmart(env, c.dest, item.fileId, caption, item.fileName, item.mimeType);
-    case "audio": return await sendAudioSmart(env, c.dest, item.fileId, caption, item.fileName);
-    case "voice": return await sendVoiceSmart(env, c.dest, item.fileId, caption);
-    case "animation": return await sendAnimationSmart(env, c.dest, item.fileId, caption);
-    case "sticker": return await sendStickerSmart(env, c.dest, item.fileId);
-    default: return await bale(env, "sendMessage", { chat_id: c.dest, text: caption || item.caption || "—" });
+  try {
+    switch (item.type) {
+      case "photo": return await sendPhotoSmart(env, c.dest, item.fileId, caption);
+      case "video": return await sendVideoSmart(env, c.dest, item.fileId, caption, item.fileName);
+      case "document": return await sendDocumentSmart(env, c.dest, item.fileId, caption, item.fileName, item.mimeType);
+      case "audio": return await sendAudioSmart(env, c.dest, item.fileId, caption, item.fileName);
+      case "voice": return await sendVoiceSmart(env, c.dest, item.fileId, caption);
+      case "animation": return await sendAnimationSmart(env, c.dest, item.fileId, caption);
+      case "sticker": return await sendStickerSmart(env, c.dest, item.fileId);
+      default: return await bale(env, "sendMessage", { chat_id: c.dest, text: caption || item.caption || "—" });
+    }
+  } catch (e) {
+    if (item.type !== "text" && item.sourceMessageId) {
+      console.log(JSON.stringify({ event: "COPY_FALLBACK", id: item.id, err: String(e.message) }));
+      return await bale(env, "copyMessage", { chat_id: c.dest, from_chat_id: item.sourceChatId, message_id: item.sourceMessageId });
+    }
+    throw e;
   }
 }
 async function sendAlbum(env, item) {
@@ -509,7 +506,7 @@ async function handleTagAdmin(env, kv, c, msg) {
   if (text === "/status" || text === "/admin") {
     const st = await readState(kv);
     const bank = await loadHashtagBank(kv);
-    const txt = "📊 وضعیت بات (V32)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
+    const txt = "📊 وضعیت بات (V33)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
     await adminSay(env, chatId, txt, MENUS.home.rows);
     return true;
   }
@@ -682,7 +679,7 @@ async function onCron(env) {
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V32)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V33)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
