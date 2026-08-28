@@ -242,12 +242,8 @@ async function sendWithUpload(env, method, field, dest, fileId, caption, fileNam
 async function sendPhotoSmart(env, dest, fileId, caption) {
   try { return await bale(env, "sendPhoto", { chat_id: dest, photo: fileId, caption: caption || undefined }); }
   catch (e) {
-    const msg = String(e.message || "");
-    if (msg.includes("malformed") || msg.includes("Bad Request") || msg.includes("not found")) {
-      console.log(JSON.stringify({ event: "PHOTO_FALLBACK_UPLOAD", fileId: fileId }));
-      return await sendWithUpload(env, "sendPhoto", "photo", dest, fileId, caption, "photo.jpg", "image/jpeg");
-    }
-    throw e;
+    console.log(JSON.stringify({ event: "PHOTO_FALLBACK_UPLOAD", fileId: fileId, err: String(e.message) }));
+    return await sendWithUpload(env, "sendPhoto", "photo", dest, fileId, caption, "photo.jpg", "image/jpeg");
   }
 }
 async function sendVideoSmart(env, dest, fileId, caption, fileName) {
