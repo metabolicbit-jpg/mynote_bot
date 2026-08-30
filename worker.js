@@ -1,4 +1,4 @@
-const VERSION = "V35-POLL-FIX-2026-08-30";
+const VERSION = "V36.1-FULL-AUTO-2026-08-30";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 const BALE_FILE_BASE = "https://tapi.bale.ai/file";
 const STATE_KEY = "mynote:state26";
@@ -384,7 +384,7 @@ async function migrate(kv) {
     await kvDeleteSafe(kv, "mynote:albums"); await kvDeleteSafe(kv, "mynote:sched");
     await kvDeleteSafe(kv, "mynote:state24"); await kvDeleteSafe(kv, "mynote:state25");
     await kvDeleteSafe(kv, "mynote:last_webhook");
-    console.log(JSON.stringify({ event: "MIGRATED_TO_V35" }));
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V36" }));
   } catch (e) { console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message })); }
   await kvPutJSON(kv, MIG_KEY, { at: Date.now() }, 2592000);
 }
@@ -394,7 +394,6 @@ function buildItemFromMessage(msg) {
   const fileId = extractFileId(msg, type);
   const caption = msg.caption || msg.text || "";
   const entities = msg.caption_entities || msg.entities || [];
-  /* 🎯 V35: اگر sender_chat هست (polling mode)، sourceChatId را از آن بگیر */
   const sourceChatId = msg.sender_chat ? String(msg.sender_chat.id) : String(msg.chat.id);
   return {
     id: "msg-" + sourceChatId + "-" + msg.message_id,
@@ -513,7 +512,7 @@ async function handleTagAdmin(env, kv, c, msg) {
   if (text === "/status" || text === "/admin") {
     const st = await readState(kv);
     const bank = await loadHashtagBank(kv);
-    const txt = "📊 وضعیت بات (V35)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
+    const txt = "📊 وضعیت بات (V36.1)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
     await adminSay(env, chatId, txt, MENUS.home.rows);
     return true;
   }
@@ -646,10 +645,112 @@ function backoffSeconds(attempt, retryAfter) {
   return delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)];
 }
 
+/* 🎯 V36.1: polling خودکار با پشتیبانی از پست‌های کانال + پیام‌های admin */
+async function pollNow(env) {
+  const KV = env.MYNOTE_KV || env.KV;
+  const c = cfg(env);
+  const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
+  if (!token) return { ok: false, error: "no token", queued: 0 };
+  
+  let offset = 0;
+  try {
+    count("r"); const saved = await KV.get(POLL_OFFSET_KEY);
+    if (saved) offset = parseInt(saved) || 0;
+  } catch (e) {}
+  
+  try {
+    const res = await fetch(BALE_BASE + token + "/getUpdates?offset=" + offset + "&limit=100&timeout=0");
+    const data = await res.json().catch(function () { return null; });
+    if (!data || !data.ok) return { ok: false, error: "getUpdates failed", queued: 0 };
+    
+    const updates = data.result || [];
+    let processed = 0, queued = 0, adminHandled = 0, newOffset = offset;
+    
+    for (const u of updates) {
+      if (u.update_id >= newOffset) newOffset = u.update_id + 1;
+      
+      /* 🎯 V36.1: اول چک کن آیا پیام از admin است (دستورات /admin, /status و غیره) */
+      if (u.message && c.admin && String(u.message.chat.id) === c.admin) {
+        try {
+          await handleTagAdmin(env, KV, c, u.message);
+          adminHandled++;
+        } catch (e) {
+          console.log(JSON.stringify({ event: "ADMIN_POLL_ERROR", err: String(e.message) }));
+        }
+        processed++;
+        continue;
+      }
+      
+      /* 🎯 پردازش پست‌های کانال */
+      let msg = u.channel_post;
+      if (!msg && u.message && u.message.sender_chat && u.message.sender_chat.type === "channel") {
+        msg = u.message;
+      }
+      if (!msg) { processed++; continue; }
+      
+      const chatId = String(msg.chat ? msg.chat.id : "");
+      const senderChatId = msg.sender_chat ? String(msg.sender_chat.id) : chatId;
+      const actualSource = msg.sender_chat ? senderChatId : chatId;
+      
+      if (c.source) {
+        const sourceMatches = actualSource === c.source || actualSource === "-100" + c.source;
+        if (!sourceMatches) { processed++; continue; }
+      }
+      if (c.dest && actualSource === c.dest) { processed++; continue; }
+      
+      const item = buildItemFromMessage(msg);
+      await withState(KV, function (st) {
+        if (item.hash && st.hashes.includes(item.hash)) return {};
+        if (st.items.some(function (x) { return x.id === item.id; })) return {};
+        if (msg.media_group_id) {
+          const mgid = String(msg.media_group_id);
+          const a = st.albums[mgid] || { id: "album-" + actualSource + "-" + mgid, type: "album", sourceChatId: actualSource, mediaGroupId: mgid, items: [], updatedAt: 0 };
+          if (!a.items.some(function (x) { return x.id === item.id; })) a.items.push(item);
+          a.updatedAt = Date.now();
+          st.albums[mgid] = a;
+        } else {
+          st.items.push(item);
+        }
+        if (item.hash) { st.hashes.push(item.hash); while (st.hashes.length > c.hashHistory) st.hashes.shift(); }
+        st.sched.received = (st.sched.received || 0) + 1;
+        queued++;
+        return {};
+      });
+      processed++;
+    }
+    
+    try { count("w"); await KV.put(POLL_OFFSET_KEY, String(newOffset), { expirationTtl: 86400 * 7 }); } catch (e) {}
+    
+    if (queued > 0 || adminHandled > 0) {
+      console.log(JSON.stringify({ event: "POLL_COLLECTED", queued: queued, adminHandled: adminHandled }));
+    }
+    return { 
+      ok: true, 
+      processed: processed, 
+      queued: queued, 
+      adminHandled: adminHandled,
+      newOffset: newOffset, 
+      updatesCount: updates.length 
+    };
+  } catch (e) {
+    return { ok: false, error: String(e.message), queued: 0 };
+  }
+}
+
 async function onCron(env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
   await migrate(KV);
+
+  /* 🎯 V36.1: polling خودکار قبل از هر چیز */
+  try {
+    const pollResult = await pollNow(env);
+    if (pollResult.ok && (pollResult.queued > 0 || pollResult.adminHandled > 0)) {
+      console.log(JSON.stringify({ event: "AUTO_POLL", queued: pollResult.queued, adminHandled: pollResult.adminHandled }));
+    }
+  } catch (e) {
+    console.log(JSON.stringify({ event: "AUTO_POLL_ERROR", err: String(e.message) }));
+  }
 
   const pre = await readState(KV);
   const today = new Date().toISOString().slice(0, 10);
@@ -686,7 +787,7 @@ async function onCron(env) {
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V35)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V36.1)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
@@ -745,96 +846,6 @@ async function onCron(env) {
     }
     return {};
   });
-}
-
-/* 🎯 V35: polling با پشتیبانی از message کانال (وقتی webhook قطع است) */
-async function pollNow(env) {
-  const KV = env.MYNOTE_KV || env.KV;
-  const c = cfg(env);
-  const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
-  if (!token) return { ok: false, error: "no token" };
-  
-  let offset = 0;
-  try {
-    count("r"); const saved = await KV.get(POLL_OFFSET_KEY);
-    if (saved) offset = parseInt(saved) || 0;
-  } catch (e) {}
-  
-  const res = await fetch(BALE_BASE + token + "/getUpdates?offset=" + offset + "&limit=100&timeout=0");
-  const data = await res.json().catch(function () { return null; });
-  if (!data || !data.ok) return { ok: false, error: "getUpdates failed" };
-  
-  const updates = data.result || [];
-  let processed = 0, queued = 0, skipped = 0, newOffset = offset;
-  const debug = [];
-  
-  for (const u of updates) {
-    if (u.update_id >= newOffset) newOffset = u.update_id + 1;
-    
-    /* 🎯 V35: هم channel_post و هم message از کانال را بگیر */
-    let msg = u.channel_post;
-    if (!msg && u.message && u.message.sender_chat && u.message.sender_chat.type === "channel") {
-      msg = u.message;
-    }
-    
-    if (!msg) { skipped++; continue; }
-    
-    const chatId = String(msg.chat ? msg.chat.id : "");
-    const senderChatId = msg.sender_chat ? String(msg.sender_chat.id) : chatId;
-    const actualSource = msg.sender_chat ? senderChatId : chatId;
-    
-    if (debug.length < 10) {
-      debug.push({
-        update_id: u.update_id,
-        has_channel_post: !!u.channel_post,
-        has_message: !!u.message,
-        chat_id: chatId,
-        sender_chat_id: senderChatId,
-        actual_source: actualSource,
-        expected_source: c.source
-      });
-    }
-    
-    /* چک source */
-    if (c.source) {
-      const sourceMatches = actualSource === c.source || actualSource === "-100" + c.source;
-      if (!sourceMatches) { processed++; continue; }
-    }
-    /* ignore dest echo */
-    if (c.dest && actualSource === c.dest) { processed++; continue; }
-    
-    const item = buildItemFromMessage(msg);
-    await withState(KV, function (st) {
-      if (item.hash && st.hashes.includes(item.hash)) return {};
-      if (st.items.some(function (x) { return x.id === item.id; })) return {};
-      if (msg.media_group_id) {
-        const mgid = String(msg.media_group_id);
-        const a = st.albums[mgid] || { id: "album-" + actualSource + "-" + mgid, type: "album", sourceChatId: actualSource, mediaGroupId: mgid, items: [], updatedAt: 0 };
-        if (!a.items.some(function (x) { return x.id === item.id; })) a.items.push(item);
-        a.updatedAt = Date.now();
-        st.albums[mgid] = a;
-      } else {
-        st.items.push(item);
-      }
-      if (item.hash) { st.hashes.push(item.hash); while (st.hashes.length > c.hashHistory) st.hashes.shift(); }
-      st.sched.received = (st.sched.received || 0) + 1;
-      queued++;
-      return {};
-    });
-    processed++;
-  }
-  
-  try { count("w"); await KV.put(POLL_OFFSET_KEY, String(newOffset), { expirationTtl: 86400 * 7 }); } catch (e) {}
-  
-  return { 
-    ok: true, 
-    processed: processed, 
-    queued: queued, 
-    skipped: skipped,
-    newOffset: newOffset, 
-    updatesCount: updates.length,
-    debug: debug
-  };
 }
 
 function isAdmin(req, env) {
