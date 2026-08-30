@@ -835,9 +835,17 @@ export default {
       const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
       const webhookUrl = "https://mynote-worker.metabolicbit.workers.dev/webhook";
       try {
-        const payload = { url: webhookUrl, allowed_updates: ["message", "channel_post"], drop_pending_updates: false };
+        const payload = { 
+          url: webhookUrl, 
+          allowed_updates: ["message", "channel_post"], 
+          drop_pending_updates: true  /* 🎯 تغییر کلیدی */
+        };
         if (env.BALE_WEBHOOK_SECRET) payload.secret_token = env.BALE_WEBHOOK_SECRET;
-        const res = await fetch(BALE_BASE + token + "/setWebhook", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const res = await fetch(BALE_BASE + token + "/setWebhook", { 
+          method: "POST", 
+          headers: { "Content-Type": "application/json" }, 
+          body: JSON.stringify(payload) 
+        });
         const data = await res.json();
         return json({ ok: true, webhook: webhookUrl, result: data });
       } catch (e) { return json({ ok: false, error: e.message }, 500); }
