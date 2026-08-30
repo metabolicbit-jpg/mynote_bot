@@ -1,9 +1,10 @@
-const VERSION = "V33-COPY-FALLBACK-2026-08-28";
+const VERSION = "V34-POLL-2026-08-30";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 const BALE_FILE_BASE = "https://tapi.bale.ai/file";
 const STATE_KEY = "mynote:state26";
 const QLOCK_KEY = "mynote:qlock26";
 const MIG_KEY = "mynote:migrated26";
+const POLL_OFFSET_KEY = "mynote:poll_offset";
 const HASHTAG_BANK_KEY = "mynote:hashtag_bank";
 const TAG_STATE_PREFIX = "mynote:tag_state:";
 const CLEAN_RULES_KEY = "mynote:cleaning_rules";
@@ -383,7 +384,7 @@ async function migrate(kv) {
     await kvDeleteSafe(kv, "mynote:albums"); await kvDeleteSafe(kv, "mynote:sched");
     await kvDeleteSafe(kv, "mynote:state24"); await kvDeleteSafe(kv, "mynote:state25");
     await kvDeleteSafe(kv, "mynote:last_webhook");
-    console.log(JSON.stringify({ event: "MIGRATED_TO_V33" }));
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V34" }));
   } catch (e) { console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message })); }
   await kvPutJSON(kv, MIG_KEY, { at: Date.now() }, 2592000);
 }
@@ -412,7 +413,7 @@ async function makeCaption(env, kv, item) {
   return caption;
 }
 
-/* 🎯 V33: sendSingle با ۳ پله: smart send → upload → copyMessage */
+/* 🎯 sendSingle با ۴ پله: smart send → upload → copyMessage → forwardMessage */
 async function sendSingle(env, item) {
   const c = cfg(env);
   const kv = env.MYNOTE_KV || env.KV;
@@ -431,7 +432,12 @@ async function sendSingle(env, item) {
   } catch (e) {
     if (item.type !== "text" && item.sourceMessageId) {
       console.log(JSON.stringify({ event: "COPY_FALLBACK", id: item.id, err: String(e.message) }));
-      return await bale(env, "copyMessage", { chat_id: c.dest, from_chat_id: item.sourceChatId, message_id: item.sourceMessageId });
+      try {
+        return await bale(env, "copyMessage", { chat_id: c.dest, from_chat_id: item.sourceChatId, message_id: item.sourceMessageId });
+      } catch (e2) {
+        console.log(JSON.stringify({ event: "FORWARD_FALLBACK", id: item.id, err: String(e2.message) }));
+        return await bale(env, "forwardMessage", { chat_id: c.dest, from_chat_id: item.sourceChatId, message_id: item.sourceMessageId });
+      }
     }
     throw e;
   }
@@ -506,7 +512,7 @@ async function handleTagAdmin(env, kv, c, msg) {
   if (text === "/status" || text === "/admin") {
     const st = await readState(kv);
     const bank = await loadHashtagBank(kv);
-    const txt = "📊 وضعیت بات (V33)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
+    const txt = "📊 وضعیت بات (V34)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
     await adminSay(env, chatId, txt, MENUS.home.rows);
     return true;
   }
@@ -679,7 +685,7 @@ async function onCron(env) {
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V33)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V34)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
@@ -738,6 +744,69 @@ async function onCron(env) {
     }
     return {};
   });
+}
+
+/* 🎯 V34: polling دستی برای وقتی که webhook کار نمی‌کند */
+async function pollNow(env) {
+  const KV = env.MYNOTE_KV || env.KV;
+  const c = cfg(env);
+  const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
+  if (!token) return { ok: false, error: "no token" };
+  
+  // خواندن offset از KV
+  let offset = 0;
+  try {
+    count("r"); const saved = await KV.get(POLL_OFFSET_KEY);
+    if (saved) offset = parseInt(saved) || 0;
+  } catch (e) {}
+  
+  // گرفتن آپدیت‌ها
+  const res = await fetch(BALE_BASE + token + "/getUpdates?offset=" + offset + "&limit=100&timeout=0");
+  const data = await res.json().catch(function () { return null; });
+  if (!data || !data.ok) return { ok: false, error: "getUpdates failed" };
+  
+  const updates = data.result || [];
+  let processed = 0, queued = 0, newOffset = offset;
+  
+  for (const u of updates) {
+    if (u.update_id >= newOffset) newOffset = u.update_id + 1;
+    const msg = u.channel_post;
+    if (!msg) continue;
+    const chatId = String(msg.chat ? msg.chat.id : "");
+    
+    // چک source
+    if (c.source) {
+      const sourceMatches = chatId === c.source || chatId === "-100" + c.source;
+      if (!sourceMatches) { processed++; continue; }
+    }
+    // ignore dest echo
+    if (c.dest && chatId === c.dest) { processed++; continue; }
+    
+    const item = buildItemFromMessage(msg);
+    await withState(KV, function (st) {
+      if (item.hash && st.hashes.includes(item.hash)) return {};
+      if (st.items.some(function (x) { return x.id === item.id; })) return {};
+      if (msg.media_group_id) {
+        const mgid = String(msg.media_group_id);
+        const a = st.albums[mgid] || { id: "album-" + chatId + "-" + mgid, type: "album", sourceChatId: chatId, mediaGroupId: mgid, items: [], updatedAt: 0 };
+        if (!a.items.some(function (x) { return x.id === item.id; })) a.items.push(item);
+        a.updatedAt = Date.now();
+        st.albums[mgid] = a;
+      } else {
+        st.items.push(item);
+      }
+      if (item.hash) { st.hashes.push(item.hash); while (st.hashes.length > c.hashHistory) st.hashes.shift(); }
+      st.sched.received = (st.sched.received || 0) + 1;
+      queued++;
+      return {};
+    });
+    processed++;
+  }
+  
+  // ذخیره offset
+  try { count("w"); await KV.put(POLL_OFFSET_KEY, String(newOffset), { expirationTtl: 86400 * 7 }); } catch (e) {}
+  
+  return { ok: true, processed: processed, queued: queued, newOffset: newOffset, updatesCount: updates.length };
 }
 
 function isAdmin(req, env) {
@@ -812,6 +881,14 @@ export default {
       return json({ ok: true });
     }
     if (p === "/admin/tags") { if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 }); return json({ ok: true, bank: await loadHashtagBank(KV) }); }
+    /* 🎯 V34: polling دستی */
+    if (p === "/admin/poll-now") {
+      if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
+      try {
+        const result = await pollNow(env);
+        return json(result);
+      } catch (e) { return json({ ok: false, error: e.message }, 500); }
+    }
     if (p === "/admin/purge-source") {
       if (!isAdmin(request, env)) return new Response("Unauthorized", { status: 401 });
       const url = new URL(request.url);
@@ -835,17 +912,9 @@ export default {
       const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
       const webhookUrl = "https://mynote-worker.metabolicbit.workers.dev/webhook";
       try {
-        const payload = { 
-          url: webhookUrl, 
-          allowed_updates: ["message", "channel_post"], 
-          drop_pending_updates: true  /* 🎯 تغییر کلیدی */
-        };
+        const payload = { url: webhookUrl, allowed_updates: ["message", "channel_post"], drop_pending_updates: false };
         if (env.BALE_WEBHOOK_SECRET) payload.secret_token = env.BALE_WEBHOOK_SECRET;
-        const res = await fetch(BALE_BASE + token + "/setWebhook", { 
-          method: "POST", 
-          headers: { "Content-Type": "application/json" }, 
-          body: JSON.stringify(payload) 
-        });
+        const res = await fetch(BALE_BASE + token + "/setWebhook", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
         return json({ ok: true, webhook: webhookUrl, result: data });
       } catch (e) { return json({ ok: false, error: e.message }, 500); }
