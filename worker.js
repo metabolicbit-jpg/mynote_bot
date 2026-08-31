@@ -1,4 +1,4 @@
-const VERSION = "V36.1-FULL-AUTO-2026-08-30";
+const VERSION = "V37-DRAIN-2026-08-31";
 const BALE_BASE = "https://tapi.bale.ai/bot";
 const BALE_FILE_BASE = "https://tapi.bale.ai/file";
 const STATE_KEY = "mynote:state26";
@@ -291,7 +291,7 @@ async function sendStickerSmart(env, dest, fileId) {
 }
 
 function emptyState() {
-  return { items: [], albums: {}, dlq: [], hashes: [], usage: null, sched: { nextSendAt: 0, lastSendAt: 0, lastReportAt: 0, sent: 0, failed: 0, retries: 0, received: 0, ignored: 0, lastError: null, lastIgnoreReason: null } };
+  return { items: [], albums: {}, dlq: [], hashes: [], usage: null, sched: { nextSendAt: 0, lastSendAt: 0, lastReportAt: 0, sent: 0, failed: 0, retries: 0, received: 0, ignored: 0, lastError: null, lastIgnoreReason: null, lastPollAt: 0, lastPollQueued: 0 } };
 }
 async function readState(kv) { return (await kvGetJSON(kv, STATE_KEY)) || emptyState(); }
 
@@ -300,7 +300,6 @@ function readUsage(st) {
   if (!st.usage || st.usage.day !== today) return { day: today, w: 0, r: 0, l: 0 };
   return st.usage;
 }
-
 function flushUsage(st) {
   const today = new Date().toISOString().slice(0, 10);
   if (!st.usage || st.usage.day !== today) st.usage = { day: today, w: 0, r: 0, l: 0 };
@@ -310,7 +309,7 @@ function flushUsage(st) {
 function quotaText(st) {
   const u = readUsage(st);
   const wr = KV_LIMITS.write - u.w, rr = KV_LIMITS.read - u.r, lr = KV_LIMITS.list - u.l;
-  let t = "💾 سهمیهٔ KV امروز\n✍️ نوشتن: " + u.w + "/" + KV_LIMITS.write + " (مانده " + wr + ")\n📖 خواندن: " + u.r + "/" + KV_LIMITS.read + " (مانده " + rr + ")\n📋 list: " + u.l + "/" + KV_LIMITS.list + " (مانده " + lr + ")";
+  let t = "💾 سهمیه KV امروز\n✍️ نوشتن: " + u.w + "/" + KV_LIMITS.write + " (مانده " + wr + ")\n📖 خواندن: " + u.r + "/" + KV_LIMITS.read + " (مانده " + rr + ")\n📋 list: " + u.l + "/" + KV_LIMITS.list + " (مانده " + lr + ")";
   if (wr < 200) t += "\n⚠️ سهمیهٔ نوشتن رو به اتمام است!";
   return t;
 }
@@ -384,7 +383,7 @@ async function migrate(kv) {
     await kvDeleteSafe(kv, "mynote:albums"); await kvDeleteSafe(kv, "mynote:sched");
     await kvDeleteSafe(kv, "mynote:state24"); await kvDeleteSafe(kv, "mynote:state25");
     await kvDeleteSafe(kv, "mynote:last_webhook");
-    console.log(JSON.stringify({ event: "MIGRATED_TO_V36" }));
+    console.log(JSON.stringify({ event: "MIGRATED_TO_V37" }));
   } catch (e) { console.log(JSON.stringify({ event: "MIGRATE_ERROR", err: e.message })); }
   await kvPutJSON(kv, MIG_KEY, { at: Date.now() }, 2592000);
 }
@@ -512,7 +511,7 @@ async function handleTagAdmin(env, kv, c, msg) {
   if (text === "/status" || text === "/admin") {
     const st = await readState(kv);
     const bank = await loadHashtagBank(kv);
-    const txt = "📊 وضعیت بات (V36.1)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
+    const txt = "📊 وضعیت بات (V37)\n\n📥 دریافتی: " + st.sched.received + "\n📤 ارسال موفق: " + st.sched.sent + "\n🔁 Retry: " + st.sched.retries + "\n☠️ DLQ: " + st.dlq.length + "\n📦 صف: " + st.items.length + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st.sched.nextSendAt ? iso(st.sched.nextSendAt) : "—") + "\n🕑 آخرین poll: " + (st.sched.lastPollAt ? iso(st.sched.lastPollAt) : "—") + " (+" + (st.sched.lastPollQueued || 0) + ")" + "\n\n" + quotaText(st) + "\n\n" + (st.sched.lastError ? "⚠️ خطا: " + st.sched.lastError : "✅ بدون خطا");
     await adminSay(env, chatId, txt, MENUS.home.rows);
     return true;
   }
@@ -645,96 +644,65 @@ function backoffSeconds(attempt, retryAfter) {
   return delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)];
 }
 
-/* 🎯 V36.1: polling خودکار با پشتیبانی از پست‌های کانال + پیام‌های admin */
+/* 🎯 V37: polling ارزان — بیکار=۰ نوشتن، جمع‌آوری دسته‌ای */
 async function pollNow(env) {
   const KV = env.MYNOTE_KV || env.KV;
   const c = cfg(env);
   const token = env.BALE_BOT_TOKEN || env.BALE_TOKEN;
   if (!token) return { ok: false, error: "no token", queued: 0 };
-  
   let offset = 0;
-  try {
-    count("r"); const saved = await KV.get(POLL_OFFSET_KEY);
-    if (saved) offset = parseInt(saved) || 0;
-  } catch (e) {}
-  
+  try { count("r"); const saved = await KV.get(POLL_OFFSET_KEY); if (saved) offset = parseInt(saved) || 0; } catch (e) {}
   try {
     const res = await fetch(BALE_BASE + token + "/getUpdates?offset=" + offset + "&limit=100&timeout=0");
     const data = await res.json().catch(function () { return null; });
     if (!data || !data.ok) return { ok: false, error: "getUpdates failed", queued: 0 };
-    
     const updates = data.result || [];
-    let processed = 0, queued = 0, adminHandled = 0, newOffset = offset;
-    
+    let newOffset = offset, adminHandled = 0;
+    const newItems = [];
     for (const u of updates) {
       if (u.update_id >= newOffset) newOffset = u.update_id + 1;
-      
-      /* 🎯 V36.1: اول چک کن آیا پیام از admin است (دستورات /admin, /status و غیره) */
       if (u.message && c.admin && String(u.message.chat.id) === c.admin) {
-        try {
-          await handleTagAdmin(env, KV, c, u.message);
-          adminHandled++;
-        } catch (e) {
-          console.log(JSON.stringify({ event: "ADMIN_POLL_ERROR", err: String(e.message) }));
-        }
-        processed++;
+        try { await handleTagAdmin(env, KV, c, u.message); adminHandled++; } catch (e) {}
         continue;
       }
-      
-      /* 🎯 پردازش پست‌های کانال */
       let msg = u.channel_post;
-      if (!msg && u.message && u.message.sender_chat && u.message.sender_chat.type === "channel") {
-        msg = u.message;
-      }
-      if (!msg) { processed++; continue; }
-      
+      if (!msg && u.message && u.message.sender_chat && u.message.sender_chat.type === "channel") msg = u.message;
+      if (!msg) continue;
       const chatId = String(msg.chat ? msg.chat.id : "");
-      const senderChatId = msg.sender_chat ? String(msg.sender_chat.id) : chatId;
-      const actualSource = msg.sender_chat ? senderChatId : chatId;
-      
-      if (c.source) {
-        const sourceMatches = actualSource === c.source || actualSource === "-100" + c.source;
-        if (!sourceMatches) { processed++; continue; }
-      }
-      if (c.dest && actualSource === c.dest) { processed++; continue; }
-      
-      const item = buildItemFromMessage(msg);
+      const actualSource = msg.sender_chat ? String(msg.sender_chat.id) : chatId;
+      if (c.source) { if (!(actualSource === c.source || actualSource === "-100" + c.source)) continue; }
+      if (c.dest && actualSource === c.dest) continue;
+      newItems.push({ msg: msg, actualSource: actualSource });
+    }
+    /* فقط اگر offset عوض شد بنویس */
+    if (newOffset !== offset) { try { count("w"); await KV.put(POLL_OFFSET_KEY, String(newOffset), { expirationTtl: 86400 * 7 }); } catch (e) {} }
+    /* همهٔ پست‌ها در یک نوشتن دسته‌ای */
+    let queued = 0;
+    if (newItems.length > 0) {
       await withState(KV, function (st) {
-        if (item.hash && st.hashes.includes(item.hash)) return {};
-        if (st.items.some(function (x) { return x.id === item.id; })) return {};
-        if (msg.media_group_id) {
-          const mgid = String(msg.media_group_id);
-          const a = st.albums[mgid] || { id: "album-" + actualSource + "-" + mgid, type: "album", sourceChatId: actualSource, mediaGroupId: mgid, items: [], updatedAt: 0 };
-          if (!a.items.some(function (x) { return x.id === item.id; })) a.items.push(item);
-          a.updatedAt = Date.now();
-          st.albums[mgid] = a;
-        } else {
-          st.items.push(item);
+        for (const it of newItems) {
+          const msg = it.msg;
+          const item = buildItemFromMessage(msg);
+          if (item.hash && st.hashes.includes(item.hash)) continue;
+          if (st.items.some(function (x) { return x.id === item.id; })) continue;
+          if (msg.media_group_id) {
+            const mgid = String(msg.media_group_id);
+            const a = st.albums[mgid] || { id: "album-" + it.actualSource + "-" + mgid, type: "album", sourceChatId: it.actualSource, mediaGroupId: mgid, items: [], updatedAt: 0 };
+            if (!a.items.some(function (x) { return x.id === item.id; })) a.items.push(item);
+            a.updatedAt = Date.now(); st.albums[mgid] = a;
+          } else { st.items.push(item); }
+          if (item.hash) { st.hashes.push(item.hash); while (st.hashes.length > c.hashHistory) st.hashes.shift(); }
+          st.sched.received = (st.sched.received || 0) + 1;
+          queued++;
         }
-        if (item.hash) { st.hashes.push(item.hash); while (st.hashes.length > c.hashHistory) st.hashes.shift(); }
-        st.sched.received = (st.sched.received || 0) + 1;
-        queued++;
+        st.sched.lastPollAt = Date.now();
+        st.sched.lastPollQueued = queued;
         return {};
       });
-      processed++;
     }
-    
-    try { count("w"); await KV.put(POLL_OFFSET_KEY, String(newOffset), { expirationTtl: 86400 * 7 }); } catch (e) {}
-    
-    if (queued > 0 || adminHandled > 0) {
-      console.log(JSON.stringify({ event: "POLL_COLLECTED", queued: queued, adminHandled: adminHandled }));
-    }
-    return { 
-      ok: true, 
-      processed: processed, 
-      queued: queued, 
-      adminHandled: adminHandled,
-      newOffset: newOffset, 
-      updatesCount: updates.length 
-    };
-  } catch (e) {
-    return { ok: false, error: String(e.message), queued: 0 };
-  }
+    if (queued > 0 || adminHandled > 0) console.log(JSON.stringify({ event: "POLL_COLLECTED", queued: queued, adminHandled: adminHandled }));
+    return { ok: true, queued: queued, adminHandled: adminHandled, newOffset: newOffset, updatesCount: updates.length };
+  } catch (e) { return { ok: false, error: String(e.message), queued: 0 }; }
 }
 
 async function onCron(env) {
@@ -742,7 +710,7 @@ async function onCron(env) {
   const c = cfg(env);
   await migrate(KV);
 
-  /* 🎯 V36.1: polling خودکار قبل از هر چیز */
+  /* 🎯 V37: polling خودکار */
   try {
     const pollResult = await pollNow(env);
     if (pollResult.ok && (pollResult.queued > 0 || pollResult.adminHandled > 0)) {
@@ -787,7 +755,7 @@ async function onCron(env) {
   const st1 = await readState(KV);
   if (c.admin && now - (st1.sched.lastReportAt || 0) >= c.reportInt * 1000) {
     const bank = await loadHashtagBank(KV);
-    const txt = "📊 گزارش mynote_bot (V36.1)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
+    const txt = "📊 گزارش mynote_bot (V37)\n\n🕐 " + iso(now) + "\n⏰ بازه: " + String(Math.floor(c.windowStart / 60)).padStart(2, "0") + ":" + String(c.windowStart % 60).padStart(2, "0") + " تا " + String(Math.floor(c.windowEnd / 60)).padStart(2, "0") + ":" + String(c.windowEnd % 60).padStart(2, "0") + "\n\n📥 دریافتی: " + st1.sched.received + "\n📤 ارسال موفق: " + st1.sched.sent + "\n🔁 Retry: " + st1.sched.retries + "\n☠️ DLQ: " + st1.dlq.length + "\n❌ Failed: " + st1.sched.failed + "\n📦 صف: " + st1.items.length + "\n🚫 رد شده: " + (st1.sched.ignored || 0) + "\n🏷️ هشتگ‌ها: " + Object.keys(bank.keywords).length + "\n⏭ ارسال بعدی: " + (st1.sched.nextSendAt ? iso(st1.sched.nextSendAt) : "—") + "\n\n" + quotaText(st1) + "\n\n" + (st1.sched.lastError ? "⚠️ خطا: " + st1.sched.lastError : "✅ بدون خطا") + (st1.sched.lastIgnoreReason ? "\n🔎 آخرین رد: " + st1.sched.lastIgnoreReason : "");
     try { await bale(env, "sendMessage", { chat_id: c.admin, text: txt }); } catch (e) { }
     await withState(KV, function (s) { s.sched.lastReportAt = now; return {}; });
   }
